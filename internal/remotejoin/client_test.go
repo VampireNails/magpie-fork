@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yetone/magpie/internal/tailnetdns"
 )
 
 type fakeBinding struct {
@@ -49,12 +51,16 @@ func TestConfigureKeepsProviderAcrossReregistration(t *testing.T) {
 	}
 	key = "sk-magpie-key-222222222222222222222222222222222222222222222222"
 	deviceID = "abcdefabcdefabcdefabcdef"
+	tailnetdns.SetTarget("unrelated.invalid:443")
 	z, e := c.Refresh(context.Background())
 	if e != nil {
 		t.Fatal(e)
 	}
 	if a.ProviderID == "" || a.ProviderID != z.ProviderID || z.DeviceID != deviceID || b.key != key || n != 2 {
 		t.Fatal("binding did not retain identity")
+	}
+	if !tailnetdns.IsTarget(strings.TrimPrefix(root, "https://")) {
+		t.Fatal("refresh did not restore the configured DNS target")
 	}
 	data, e := os.ReadFile(filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "magpie", "remote-connection.json"))
 	if e != nil {
