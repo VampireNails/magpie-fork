@@ -112,6 +112,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie plugin move|migrate <subscription>   run a built-in subscription's accounts on its community plugin
 
   magpie serve [--web[=host:port]] [--tls-cert <file> --tls-key <file>]
+  magpie serve --remote-socket=/absolute/path/serve.sock --remote-url=https://node.example:19443
+                                  Linux Tailscale Serve endpoint for the complete management page and gateway
                                   run the gateway alone (the app runs it too); --web serves magpie web's page too, from the same process (127.0.0.1:3430 unless told);
                                   with a certificate and key (PEM; MAGPIE_TLS_CERT, MAGPIE_TLS_KEY) other computers reach both over https://
   magpie daemon [install|uninstall|start|stop|restart|status]

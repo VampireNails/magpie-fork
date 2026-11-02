@@ -223,7 +223,8 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
-	web := ""
+	web, remoteSocket, remoteURL := "", "", ""
+	remoteOption := false
 	for _, a := range args {
 		switch {
 		case a == "--web":
@@ -233,9 +234,28 @@ func serveCmd(args []string) error {
 			if _, _, err := net.SplitHostPort(web); err != nil {
 				return fmt.Errorf("magpie serve: --web=%s isn't host:port", web)
 			}
+		case strings.HasPrefix(a, "--remote-socket="):
+			remoteOption = true
+			remoteSocket = strings.TrimPrefix(a, "--remote-socket=")
+		case strings.HasPrefix(a, "--remote-url="):
+			remoteOption = true
+			remoteURL = strings.TrimPrefix(a, "--remote-url=")
 		default:
 			return fmt.Errorf("magpie serve: unknown %q · magpie serve [--web[=host:port]] [--tls-cert <file> --tls-key <file>]", a)
 		}
+	}
+	if remoteOption {
+		if remoteSocket == "" || remoteURL == "" || web != "" {
+			return fmt.Errorf("magpie serve: --remote-socket and --remote-url are both required, without --web")
+		}
+		proc.UserPath()
+		w, err := gui.StartRemoteWeb(remoteSocket, remoteURL, version)
+		if err != nil {
+			return err
+		}
+		go stats.Run(version, "serve")
+		fmt.Println(green.Render("●"), "magpie remote management on", webAddress(w.Link))
+		return w.Wait()
 	}
 	proc.UserPath() // as magpie web's (#3803)
 	if web == "" {
