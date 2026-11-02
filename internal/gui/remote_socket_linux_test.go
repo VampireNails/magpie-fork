@@ -117,6 +117,22 @@ func TestRemoteServerSocketPreservesUnknownStaleSocket(t *testing.T) {
 	}
 }
 
+func TestRemoteServerSocketPreservesUnknownLockFile(t *testing.T) {
+	p := socketPath(t)
+	os.Mkdir(filepath.Dir(p), 0700)
+	lock := filepath.Join(filepath.Dir(p), ".magpie-listener.lock")
+	os.WriteFile(lock, []byte("other application data"), 0600)
+	l, err := listenProtectedUnix(p)
+	if err == nil {
+		l.Close()
+		t.Fatal("unknown lock file was accepted")
+	}
+	b, err := os.ReadFile(lock)
+	if err != nil || string(b) != "other application data" {
+		t.Fatal("unknown lock file was modified")
+	}
+}
+
 func TestRemoteServerSocketClosePreservesReplacement(t *testing.T) {
 	p := socketPath(t)
 	os.Mkdir(filepath.Dir(p), 0700)

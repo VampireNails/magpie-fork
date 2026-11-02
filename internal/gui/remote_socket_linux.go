@@ -5,6 +5,7 @@ package gui
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -30,7 +31,12 @@ func listenProtectedUnix(path string) (net.Listener, error) {
 	}
 	// Keep one owner for this path for the listener's entire lifetime. This
 	// is a separate lifecycle lock, unrelated to the credential store lock.
-	fd, err := syscall.Open(filepath.Join(dir, ".magpie-listener.lock"), syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0600)
+	lockPath := filepath.Join(dir, ".magpie-listener.lock")
+	fd, err := syscall.Open(lockPath, syscall.O_CREAT|syscall.O_EXCL|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0600)
+	created := err == nil
+	if errors.Is(err, syscall.EEXIST) {
+		fd, err = syscall.Open(lockPath, syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC|syscall.O_NONBLOCK, 0600)
+	}
 	if err != nil {
 		return nil, errors.New("cannot open remote socket lifecycle lock")
 	}
@@ -50,13 +56,29 @@ func listenProtectedUnix(path string) (net.Listener, error) {
 			lock.Close()
 		}
 	}()
+	if !created {
+		content, err := io.ReadAll(io.LimitReader(lock, 129))
+		var dev, ino uint64
+		var extra string
+		if err != nil || len(content) > 128 {
+			return nil, errors.New("cannot validate remote socket lifecycle lock")
+		}
+		n, _ := fmt.Sscan(string(content), &dev, &ino, &extra)
+		if n != 3 || extra != "magpie-remote-socket-v1" {
+			return nil, errors.New("unrecognized remote socket lifecycle lock; leaving it untouched")
+		}
+		if _, err := lock.Seek(0, 0); err != nil {
+			return nil, err
+		}
+	}
 	if before, err := os.Lstat(path); err == nil {
 		if !privateSocketPath(before, os.ModeSocket, 0600) {
 			return nil, errors.New("remote socket path is not a private owned socket; leaving it untouched")
 		}
 		var dev, ino uint64
 		st := before.Sys().(*syscall.Stat_t)
-		if _, err := fmt.Fscan(lock, &dev, &ino); err != nil || dev != uint64(st.Dev) || ino != st.Ino {
+		var marker string
+		if _, err := fmt.Fscan(lock, &dev, &ino, &marker); err != nil || marker != "magpie-remote-socket-v1" || dev != uint64(st.Dev) || ino != st.Ino {
 			return nil, errors.New("remote socket was not created by this listener; leaving it untouched")
 		}
 		c, err := net.DialTimeout("unix", path, 200*time.Millisecond)
@@ -102,7 +124,7 @@ func listenProtectedUnix(path string) (net.Listener, error) {
 		l.Close()
 		return nil, err
 	}
-	if _, err := fmt.Fprintf(lock, "%d %d\n", uint64(st.Dev), st.Ino); err != nil {
+	if _, err := fmt.Fprintf(lock, "%d %d magpie-remote-socket-v1\n", uint64(st.Dev), st.Ino); err != nil {
 		l.Close()
 		return nil, err
 	}
