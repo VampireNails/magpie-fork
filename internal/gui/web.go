@@ -199,15 +199,25 @@ func CheckWebKey(k string) error {
 // form to paste the key into (webSignIn), which says why it was turned
 // away, so a bookmark lets the user sign in with their configured key.
 func webGuard(cookie, key string, keep time.Duration, next http.Handler) http.Handler {
+	return webSession{cookie: cookie, key: key, keep: keep}.guard(next)
+}
+
+// webSession is shared by the native key form and the verified peer bridge.
+// secure is explicit for HTTPS terminated before the protected Unix listener.
+type webSession struct {
+	cookie, key string
+	keep        time.Duration
+	secure      bool
+}
+
+func (s webSession) signIn(rw http.ResponseWriter, r *http.Request, back string) {
+	rw.Header().Add("Set-Cookie", (&http.Cookie{Name: s.cookie, Value: s.key, Path: "/", HttpOnly: true, Secure: s.secure || r.TLS != nil, SameSite: http.SameSiteLaxMode, MaxAge: int(s.keep / time.Second)}).String()+"; Priority=High")
+	http.Redirect(rw, r, back, http.StatusSeeOther)
+}
+
+func (s webSession) guard(next http.Handler) http.Handler {
+	cookie, key := s.cookie, s.key
 	same := func(v string) bool { return subtle.ConstantTimeCompare([]byte(v), []byte(key)) == 1 }
-	signIn := func(rw http.ResponseWriter, r *http.Request, back string) {
-		// Priority=High (Chrome's): the page's host is often an address
-		// other services share on other ports, and a browser keeps a
-		// limited number of cookies for one host, all ports together;
-		// past it Chrome drops the low and medium ones first (#2033)
-		rw.Header().Add("Set-Cookie", (&http.Cookie{Name: cookie, Value: key, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(keep / time.Second)}).String()+"; Priority=High")
-		http.Redirect(rw, r, back, http.StatusSeeOther)
-	}
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		// a plugin's page's files: a sandboxed frame's requests carry no
 		// cookie, and its token, which only a signed-in /api hands out,
@@ -224,7 +234,7 @@ func webGuard(cookie, key string, keep time.Duration, next http.Handler) http.Ha
 			q.Del("k")
 			u := *r.URL
 			u.RawQuery = q.Encode()
-			signIn(rw, r, u.RequestURI())
+			s.signIn(rw, r, u.RequestURI())
 			return
 		}
 		// what a phone's home screen reads to add the page as an app
@@ -242,7 +252,7 @@ func webGuard(cookie, key string, keep time.Duration, next http.Handler) http.Ha
 				webTurnedAway(rw, "That key is not this magpie web's.")
 				return
 			}
-			signIn(rw, r, back)
+			s.signIn(rw, r, back)
 			return
 		}
 		// A browser can hold more than one cookie of this name (one set
