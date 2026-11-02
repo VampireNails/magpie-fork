@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/yetone/magpie/internal/catalog"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 func TestNativeRemoteRefreshEmptyCatalog(t *testing.T) {
@@ -47,7 +48,7 @@ func TestNativeRemoteRefreshEmptyCatalog(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := status.LastSyncAt
-	for _, bad := range []string{`{}`, `{"data":null}`, `{"data":{}}`, `{"data":[{}]}`, `{"data":[null]}`, `{"error":{"message":"bad"}}`, `{"data":[],"error":{}}`, `{"data":[],"has_more":true}`, `{"data":[{"id":"one"}],"has_more":true,"last_id":"one"}`, `{`, "HTTPFAIL"} {
+	for _, bad := range []string{`{}`, `{"data":null}`, `{"data":{}}`, `{"data":[{}]}`, `{"data":[],"has_more":null}`, `{"data":[{"name":"one"}]}`, `{"data":[null]}`, `{"error":{"message":"bad"}}`, `{"data":[],"error":{}}`, `{"data":[],"has_more":true}`, `{"data":[{"id":"one"}],"has_more":true,"last_id":"one"}`, `{`, "HTTPFAIL"} {
 		body = bad
 		now = now.Add(time.Minute)
 		failed, err := c.Refresh(context.Background())
@@ -73,5 +74,21 @@ func TestNativeRemoteRefreshEmptyCatalog(t *testing.T) {
 	}
 	if changed != 0 {
 		t.Fatalf("quiet refresh invoked agent callback %d times", changed)
+	}
+	body = `{"data":[{"id":"returned"}]}`
+	p, err := provider.Find(status.ProviderID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = p.Refetch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	body = `{"data":[]}`
+	if _, _, err = p.Refetch(context.Background()); err != nil {
+		t.Fatalf("ordinary Remote refresh to empty: %v", err)
+	}
+	ms, _, ok := catalog.Live(status.ProviderID)
+	if !ok || len(ms) != 0 {
+		t.Fatalf("ordinary refresh retained models: %v, %v", ms, ok)
 	}
 }

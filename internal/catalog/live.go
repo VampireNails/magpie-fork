@@ -660,6 +660,16 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 		if !ok || string(data) == "null" || json.Unmarshal(data, &rows) != nil || rows == nil {
 			return nil, false, "", errors.New("remote model list: invalid data")
 		}
+		if more, ok := object["has_more"]; ok && string(more) != "true" && string(more) != "false" {
+			return nil, false, "", errors.New("remote model list: invalid pagination")
+		}
+		for _, row := range rows {
+			var entry map[string]json.RawMessage
+			var id string
+			if json.Unmarshal(row, &entry) != nil || entry == nil || json.Unmarshal(entry["id"], &id) != nil || strings.TrimSpace(id) == "" {
+				return nil, false, "", errors.New("remote model list: invalid model id")
+			}
+		}
 	}
 	var v struct {
 		Data    []liveModel `json:"data"`
