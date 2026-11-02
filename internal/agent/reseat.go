@@ -112,7 +112,11 @@ func Reseat(change func() error) ([]Move, error) {
 			_, suffix, _ := p.a.split(p.val)
 			to.Value += suffix
 		}
-		if err := p.a.Apply(p.key, to.Value); err != nil {
+		handled, err := managedEntryWrite(p.a, false, func(a *Agent) error { return a.apply(p.key, to.Value) })
+		if !handled {
+			err = p.a.Apply(p.key, to.Value)
+		}
+		if err != nil {
 			m.To, m.Error = "", err.Error()
 		}
 		moves = append(moves, m)

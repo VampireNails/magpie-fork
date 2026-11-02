@@ -52,9 +52,23 @@ func SyncCatalog() {
 		unhold := filememo.Hold()
 		renaming := setToFoundGroups()
 		for _, a := range All() {
-			if managedEntryBlocked(a) {
+			if handled, _ := managedEntryWrite(a, false, func(a *Agent) error {
+				// a provider named magpie written by hand is the user's, its
+				// model list too (handWired)
+				if a.Sync != nil && !a.handWired() && (!a.ListOnly || a.Wired()) {
+					if err := synced(a.Sync); err != nil {
+						return err
+					}
+				}
+				// a field magpie set to a found group's id before (autoref.go)
+				if renaming[a.ID] {
+					a.renameFoundGroups()
+				}
+				return nil
+			}); handled {
 				continue
 			}
+
 			// a provider named magpie written by hand is the user's, its
 			// model list too (handWired)
 			if a.Sync != nil && !a.handWired() && (!a.ListOnly || a.Wired()) {

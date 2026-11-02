@@ -25,7 +25,7 @@ func RenameProvider(from, to string) ([]string, error) {
 	}
 	if from != to {
 		for _, a := range Detected() {
-			if a.RenameRefs == nil || a.handWired() {
+			if a.RenameRefs == nil || a.handWired() || managedEntryBlocked(a) {
 				continue
 			}
 			ok, err := a.RenameRefs(from, to)
@@ -127,7 +127,11 @@ func renameRefs(renamed func(ref string) (string, bool), rename func() error) ([
 	}
 	var moved []string
 	for _, m := range moves {
-		if err := m.a.Apply(m.key, m.val); err != nil {
+		handled, err := managedEntryWrite(m.a, false, func(a *Agent) error { return a.apply(m.key, m.val) })
+		if !handled {
+			err = m.a.Apply(m.key, m.val)
+		}
+		if err != nil {
 			return moved, err
 		}
 		if len(moved) == 0 || moved[len(moved)-1] != m.a.Name {

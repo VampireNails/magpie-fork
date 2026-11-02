@@ -98,9 +98,12 @@ func record(id, key, v string) {
 // which read as changed outside magpie, and the drift kept the row up
 // among the connected ones while it said Not connected (#834).
 func (a *Agent) Apply(key, v string) error {
-	if managedEntryBlocked(a) {
-		return ErrManagedOwnerRequired
+	if handled, err := managedEntryWrite(a, true, func(scoped *Agent) error { return scoped.apply(key, v) }); handled {
+		return err
 	}
+	return a.apply(key, v)
+}
+func (a *Agent) apply(key, v string) error {
 	if a.Native != nil {
 		return a.Native.Apply(key, v)
 	}
@@ -401,6 +404,12 @@ func orDefault(v string) string {
 // catches. A replaced field brings back the others magpie set with it.
 // Either way the record is renewed, so a use before now no longer counts.
 func (a *Agent) Reapply() error {
+	if handled, err := managedEntryWrite(a, true, func(scoped *Agent) error { return scoped.reapply() }); handled {
+		return err
+	}
+	return a.reapply()
+}
+func (a *Agent) reapply() error {
 	if a.Native != nil {
 		return a.Native.Connect()
 	}
@@ -411,12 +420,12 @@ func (a *Agent) Reapply() error {
 	if d != nil && d.Kind == "replaced" {
 		rec := appliedOf(a.ID)
 		// the model first: the others (an effort) are checked against it
-		if err := a.Apply(d.Field, d.Want); err != nil {
+		if err := a.apply(d.Field, d.Want); err != nil {
 			return err
 		}
 		for _, f := range a.Fields {
 			if v, ok := rec.Fields[f.Key]; ok && f.Key != d.Field && f.Get() != v {
-				if err := a.Apply(f.Key, v); err != nil {
+				if err := a.apply(f.Key, v); err != nil {
 					return err
 				}
 			}
@@ -430,7 +439,7 @@ func (a *Agent) Reapply() error {
 		// left out, Reconnect set the tiers again and never the gateway
 		// Check found off (dumplings on Discord)
 		if v := vals[f.Key]; v != "" && (d != nil && f.Key == d.Field || v == magpieID || magpieValue(a, f, v, vals)) {
-			if err := a.Apply(f.Key, v); err != nil {
+			if err := a.apply(f.Key, v); err != nil {
 				return err
 			}
 		}
@@ -530,15 +539,18 @@ func (a *Agent) Wired() bool {
 // model picked in magpie in one click, both): the agent gets magpie's whole
 // list, and Disconnect puts back what it had before.
 func (a *Agent) Pick(key, v string) error {
-	if managedEntryBlocked(a) {
-		return ErrManagedOwnerRequired
+	if handled, err := managedEntryWrite(a, true, func(scoped *Agent) error { return scoped.pick(key, v) }); handled {
+		return err
 	}
+	return a.pick(key, v)
+}
+func (a *Agent) pick(key, v string) error {
 	if a.Native != nil {
 		value, err := a.Spell(key, v)
 		if err != nil {
 			return err
 		}
-		return a.Apply(key, value)
+		return a.apply(key, value)
 	}
 	if f := a.Field(key); f != nil && !a.Wired() {
 		vals := a.Values()
@@ -549,7 +561,7 @@ func (a *Agent) Pick(key, v string) error {
 			}
 		}
 	}
-	return a.Apply(key, v)
+	return a.apply(key, v)
 }
 
 // Connect puts magpie into the agent's config, the Agents page's switch
@@ -623,9 +635,12 @@ func (a *Agent) rewired(err error) {
 
 // ConnectHow is Connect, saying how the model was chosen.
 func (a *Agent) ConnectHow() (c Connection, err error) {
-	if managedEntryBlocked(a) {
-		return Connection{}, ErrManagedOwnerRequired
+	if handled, e := managedEntryWrite(a, true, func(scoped *Agent) error { var e error; c, e = scoped.connectHow(); return e }); handled {
+		return c, e
 	}
+	return a.connectHow()
+}
+func (a *Agent) connectHow() (c Connection, err error) {
 	defer func() { a.rewired(err) }()
 	if a.Native != nil {
 		return Connection{How: "joined"}, a.Native.Connect()
@@ -733,7 +748,7 @@ func (a *Agent) connect() (Connection, error) {
 	sameRank, alikeRank := -1, -1
 	for _, o := range opts {
 		if o.Value == magpieID {
-			if err := a.Apply(f.Key, magpieID); err != nil {
+			if err := a.apply(f.Key, magpieID); err != nil {
 				return Connection{}, err
 			}
 			// an app whose picker gets magpie's models as listed for it
@@ -806,7 +821,7 @@ func (a *Agent) connect() (Connection, error) {
 	if pick == "" {
 		return Connection{}, fmt.Errorf("magpie has no models %s can use: add a subscription or a provider first", a.Name)
 	}
-	return Connection{How: how, Field: f.Key, Value: pick}, a.Apply(f.Key, pick)
+	return Connection{How: how, Field: f.Key, Value: pick}, a.apply(f.Key, pick)
 }
 
 // connectWas is the model an agent is on before it is connected, as a
@@ -835,6 +850,9 @@ func connectWas(v string, opts []Option) string {
 // each one magpie set that reads as magpie set it (an effort). What magpie
 // remembered setting is forgotten.
 func (a *Agent) Disconnect() (err error) {
+	if handled, e := managedEntryDisconnect(a); handled {
+		return e
+	}
 	defer func() { a.rewired(err) }()
 	if a.Native != nil {
 		plan, err := a.Native.Disconnect()
@@ -915,6 +933,9 @@ func (a *Agent) Disconnect() (err error) {
 // DisconnectOffline restores a native agent's saved files only after an
 // explicit offline choice. Legacy callers of Disconnect keep live semantics.
 func (a *Agent) DisconnectOffline() error {
+	if handled, e := managedEntryDisconnect(a); handled {
+		return e
+	}
 	if a.Native == nil || a.Native.ExecuteOffline == nil {
 		return fmt.Errorf("%s does not support offline disconnect", a.Name)
 	}
@@ -982,7 +1003,7 @@ func (a *Agent) reconnect(now map[string]string) (bool, error) {
 	for _, k := range keys {
 		v := rec.Magpie[k]
 		if v != a.Values()[k] {
-			if err := a.Apply(k, v); err != nil {
+			if err := a.apply(k, v); err != nil {
 				return true, err
 			}
 		} else {

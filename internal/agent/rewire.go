@@ -72,7 +72,20 @@ func Rekey(as []*Agent) (moved []string, err error) {
 // magpie, and says the names of those it set and what one failed with.
 func setAgain(as []*Agent) (moved []string, errs []error) {
 	for _, a := range as {
-		if managedEntryBlocked(a) {
+		if handled, err := managedEntryWrite(a, false, func(scoped *Agent) error {
+			if err := reset(scoped); err != nil {
+				return err
+			}
+			if scoped.Sync != nil {
+				return scoped.Sync()
+			}
+			return nil
+		}); handled {
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", a.Name, err))
+			} else {
+				moved = append(moved, a.Name)
+			}
 			continue
 		}
 		// set again on the old URL, an agent reads as not routed through
@@ -123,7 +136,7 @@ func reset(a *Agent) error {
 			return err
 		}
 	}
-	return a.Reapply()
+	return a.reapply()
 }
 
 // wiredAt ends a stash key holding the gateway address magpie last wrote

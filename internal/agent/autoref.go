@@ -68,7 +68,7 @@ func (a *Agent) renameFoundGroups() bool {
 		if !ok {
 			continue
 		}
-		if a.Apply(f.Key, now) == nil {
+		if a.apply(f.Key, now) == nil {
 			moved = true
 			vals = a.Values()
 		}
