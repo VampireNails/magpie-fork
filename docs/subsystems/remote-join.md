@@ -73,8 +73,14 @@ go test -race -tags nogui ./internal/remotejoin -run 'Peer|Registration'
 ```
 
 These tests do not prove the security of a real Serve socket, native cookie
-issuance or cross-process key-store locking. The inherited access file lock can
-continue without a lock on failure or timeout; its independent fix and
-integration validation remain necessary before relying on cross-process
-uniqueness. Real tagged-node, complete management and end-to-end model use
-remain unverified by this slice.
+issuance or cross-process key-store locking. The access store now uses a strict
+lock shared by device and other caller-key operations: lock failure or timeout
+returns failure instead of proceeding without the lock. See
+[Providers and accounts](providers-accounts.md) and
+[`LockContext`](../../internal/filelock/strict.go). Registration returns
+`STORE_UNAVAILABLE` when the store cannot acquire it. The strict-lock repair's
+source tests do not establish that this combined registration tree has passed
+integration checks; those checks remain outstanding. Competing old processes
+that still use the permissive lock do not satisfy the strict-lock guarantee.
+Real tagged-node, complete management and end-to-end model use remain
+unverified by this slice.
