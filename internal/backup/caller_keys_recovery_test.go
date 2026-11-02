@@ -18,7 +18,7 @@ func TestGatewayBackupRepairsDamagedKeys(t *testing.T) {
 	if err := access.ConfigureLAN(true, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := access.EnsureDevice(context.Background(), access.DeviceIdentity{"backup-node", "1", "backup device"}); err != nil {
+	if _, err := access.EnsureDevice(context.Background(), access.DeviceIdentity{StableNodeID: "backup-node", NodeID: "1", DisplayName: "backup device"}); err != nil {
 		t.Fatal(err)
 	}
 	b, err := Collect(true, "fixture")
@@ -34,7 +34,7 @@ func TestGatewayBackupRepairsDamagedKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Explicit restore replaces, rather than merges, all current keys.
-	if _, err := access.EnsureDevice(context.Background(), access.DeviceIdentity{"other-node", "2", "other device"}); err != nil {
+	if _, err := access.EnsureDevice(context.Background(), access.DeviceIdentity{StableNodeID: "other-node", NodeID: "2", DisplayName: "other device"}); err != nil {
 		t.Fatal(err)
 	}
 	broken := []byte(`{"canary-damaged-current":`)
