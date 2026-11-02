@@ -87,9 +87,6 @@ func managedWorkBuddyTarget(a *Agent) (ManagedTarget, error) {
 			break
 		}
 	}
-	if err := managedWorkBuddySingleLink(p); err != nil {
-		return ManagedTarget{}, err
-	}
 	return ManagedTarget{Path: p, Scope: "models-file", Kind: "workbuddy-models-bytes-v1"}, nil
 }
 
@@ -113,6 +110,9 @@ func ManagedWorkBuddy(a *Agent) (ManagedAdapter, []ManagedTarget, error) {
 		if err := validate(t); err != nil {
 			return ManagedSnapshot{}, err
 		}
+		if err := managedWorkBuddySingleLink(t.Path); err != nil {
+			return ManagedSnapshot{}, err
+		}
 		fi, err := os.Stat(t.Path)
 		if errors.Is(err, os.ErrNotExist) {
 			return ManagedSnapshot{}, nil
@@ -131,6 +131,9 @@ func ManagedWorkBuddy(a *Agent) (ManagedAdapter, []ManagedTarget, error) {
 	}
 	adapter.Restore = func(t ManagedTarget, snapshot ManagedSnapshot) error {
 		if err := validate(t); err != nil {
+			return err
+		}
+		if err := managedWorkBuddySingleLink(t.Path); err != nil {
 			return err
 		}
 		if snapshot.Exists != snapshot.FileExists {
@@ -152,6 +155,9 @@ func ManagedWorkBuddy(a *Agent) (ManagedAdapter, []ManagedTarget, error) {
 		if baseline.Path != target.Path || validate(target) != nil {
 			return ErrManagedInvalid
 		}
+		if err := managedWorkBuddySingleLink(baseline.Path); err != nil {
+			return err
+		}
 		if !baseline.Exists {
 			return removeManagedWorkBuddy(baseline.Path)
 		}
@@ -168,6 +174,9 @@ func BeforeManagedWorkBuddyWrite(w *ManagedWrite, a *Agent) error {
 	}
 	target, err := managedWorkBuddyTarget(a)
 	if err != nil {
+		return err
+	}
+	if err := managedWorkBuddySingleLink(target.Path); err != nil {
 		return err
 	}
 	if err := w.BeforeManagedWrite(target); err != nil {
