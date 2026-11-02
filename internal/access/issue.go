@@ -1,6 +1,7 @@
 package access
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"fmt"
@@ -79,7 +80,9 @@ type Issued struct {
 // IssueKey makes a short-lived key. It never outlives its issuer, nor
 // is let use a model or account its issuer may not.
 func IssueKey(in Issue) (Issued, error) {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return Issued{}, err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil {
@@ -167,7 +170,9 @@ func IssueKey(in Issue) (Issued, error) {
 // remove only a key issued under it; "" is the user, who may remove any
 // issued key (a key of their own they remove with remove-key).
 func RevokeIssued(id, by string) error {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil {
@@ -199,7 +204,9 @@ func IssuedBy(by string) ([]Key, error) {
 // Prune removes the keys that expired over expiredKept ago and those
 // issued under a key no longer in the store, and says how many.
 func Prune() (int, error) {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return 0, err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil {
@@ -226,7 +233,9 @@ func prune(keys []Key, now time.Time) ([]Key, int) {
 // Check is Authenticate with why a key it knows is turned away: a
 // *Refused for one expired or whose issuer no longer lets it in.
 func Check(secret string) (Identity, error) {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return Identity{}, err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil || secret == "" {

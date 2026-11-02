@@ -1,6 +1,7 @@
 package access
 
 import (
+	"context"
 	"strings"
 
 	"github.com/yetone/magpie/internal/provider"
@@ -16,7 +17,9 @@ func init() { provider.ModelMoved = MoveModel }
 // letter case aside) to instead. A pattern ("relay/*") is the user's own
 // and is left as written.
 func MoveModel(from, to string) error {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil {

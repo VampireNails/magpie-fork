@@ -1,6 +1,7 @@
 package access
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"strings"
@@ -133,7 +134,9 @@ func ReplaceAccount(pid, was, now string) (int, error) {
 	if was == now {
 		return 0, nil
 	}
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return 0, err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil {

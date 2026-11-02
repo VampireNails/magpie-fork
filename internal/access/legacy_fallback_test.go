@@ -81,8 +81,8 @@ func TestLegacyLANFallbackWithReadOnlyDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if who, ok := Authenticate(s.LANKey); !ok || who.KeyID == "" || who.KeyName != "Magpie" {
-			t.Fatal("failed key-store creation broke legacy access", who, ok)
+		if _, ok := Authenticate(s.LANKey); ok {
+			t.Fatal("unavailable store lock enabled legacy fallback")
 		}
 	}
 }

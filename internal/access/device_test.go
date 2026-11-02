@@ -12,6 +12,9 @@ import (
 )
 
 func TestDeviceConcurrentIdentityAndRemoval(t *testing.T) {
+	oldWait := storeLockWait
+	storeLockWait = 60 * time.Second
+	t.Cleanup(func() { storeLockWait = oldWait })
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ctx := context.Background()
 	id := DeviceIdentity{"stable-a", "123", "same"}

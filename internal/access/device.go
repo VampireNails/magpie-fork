@@ -43,7 +43,9 @@ func EnsureDevice(ctx context.Context, id DeviceIdentity) (DeviceCredential, err
 	if id.StableNodeID == "" || id.NodeID == "" || id.DisplayName == "" || utf8.RuneCountInString(id.DisplayName) > 120 {
 		return DeviceCredential{}, errors.New("invalid device identity")
 	}
-	mu.Lock()
+	if err := lockStore(ctx); err != nil {
+		return DeviceCredential{}, err
+	}
 	defer mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return DeviceCredential{}, err
@@ -106,7 +108,9 @@ func ListDevices(ctx context.Context, cursor string, limit int) (DevicePage, err
 	if limit < 1 || limit > 100 {
 		return DevicePage{}, errors.New("invalid page limit")
 	}
-	mu.Lock()
+	if err := lockStore(ctx); err != nil {
+		return DevicePage{}, err
+	}
 	defer mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return DevicePage{}, err
@@ -136,7 +140,9 @@ func RemoveDevice(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	mu.Lock()
+	if err := lockStore(ctx); err != nil {
+		return err
+	}
 	defer mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return err

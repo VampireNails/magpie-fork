@@ -67,7 +67,9 @@ func ownSecrets() map[string]struct{} {
 	if own.secrets != nil && own.size == fi.Size() && own.mod == fi.ModTime().UnixNano() {
 		return own.secrets
 	}
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return nil
+	}
 	keys, err := load()
 	mu.Unlock()
 	if err != nil {
@@ -191,6 +193,11 @@ func Caller(ctx context.Context) Identity { who, _ := ctx.Value(contextKey{}).(I
 // keys while the window adds one is never written back.
 var mu = filelock.Mutex{Path: func() string { return Path() + ".lock" }}
 
+// storeLockWait is shortened only by tests. All access callers share this bound.
+var storeLockWait = filelock.Wait
+
+func lockStore(ctx context.Context) error { return mu.LockContext(ctx, storeLockWait) }
+
 func Path() string { return filepath.Join(settings.Dir(), "caller-keys.json") }
 
 func load() ([]Key, error) {
@@ -208,7 +215,9 @@ func load() ([]Key, error) {
 
 // List never returns credentials; only the administrator's copy action does.
 func List() ([]Key, error) {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return nil, err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil {
@@ -246,7 +255,9 @@ func LANSecret() string {
 	if !settings.Load().LAN {
 		return ""
 	}
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return ""
+	}
 	defer mu.Unlock()
 	s := settings.Load()
 	if !s.LAN {
@@ -280,14 +291,17 @@ func Default(secret string) bool {
 	if secret == "" {
 		return false
 	}
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return false
+	}
 	defer mu.Unlock()
 	s := settings.Load()
 	keys, err := load()
-	if err == nil {
-		if i := slices.IndexFunc(keys, func(k Key) bool { return k.LAN || k.ID == s.LANKeyID }); i >= 0 {
-			return subtle.ConstantTimeCompare([]byte(secret), []byte(keys[i].Secret)) == 1
-		}
+	if err != nil {
+		return false
+	}
+	if i := slices.IndexFunc(keys, func(k Key) bool { return k.LAN || k.ID == s.LANKeyID }); i >= 0 {
+		return subtle.ConstantTimeCompare([]byte(secret), []byte(keys[i].Secret)) == 1
 	}
 	return s.LANKey != "" && !strings.HasPrefix(s.LANKey, revokedLANPrefix) &&
 		subtle.ConstantTimeCompare([]byte(secret), []byte(s.LANKey)) == 1
@@ -295,15 +309,23 @@ func Default(secret string) bool {
 
 // Export returns credentials only for the encrypted backup bundle.
 func Export() ([]Key, error) {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return nil, err
+	}
 	defer mu.Unlock()
 	return load()
 }
 
 // Restore replaces the gateway credentials when restoring their settings.
 func Restore(keys []Key) error {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return err
+	}
 	defer mu.Unlock()
+	// Refuse to overwrite an unreadable or damaged store.
+	if _, err := load(); err != nil {
+		return err
+	}
 	return save(slices.Clone(keys))
 }
 
@@ -351,7 +373,9 @@ var Now = time.Now
 
 // Update writes the named key store atomically.
 func Update(action string, in Change) (string, error) {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return "", err
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil {
@@ -564,7 +588,9 @@ func Authenticate(secret string) (Identity, bool) {
 // turned off, or the legacy sharing key not yet written there; false when
 // the store can't be read.
 func On(id string) bool {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return false
+	}
 	defer mu.Unlock()
 	keys, err := load()
 	if err != nil || id == "" {
@@ -598,7 +624,9 @@ func legacyLANKey(secret string) Key {
 // key. Keep LANKey for older Magpie versions; LANKeyID marks a completed
 // migration so the retained credential cannot resurrect a removed key.
 func MigrateLegacyLANKey() error {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return err
+	}
 	defer mu.Unlock()
 	return migrateLegacyLANKey()
 }
@@ -652,7 +680,9 @@ func ConfigureLAN(on, rotate bool) error {
 }
 
 func configureLAN(on, rotate bool) error {
-	mu.Lock()
+	if err := lockStore(context.Background()); err != nil {
+		return err
+	}
 	defer mu.Unlock()
 	if err := migrateLegacyLANKey(); err != nil {
 		return err
