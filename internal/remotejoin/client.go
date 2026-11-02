@@ -211,6 +211,7 @@ func (c *Client) refresh(ctx context.Context) (ClientStatus, error) {
 	if s.ServerURL == "" {
 		return s, errors.New("server is not configured")
 	}
+	setDNSTarget(s.ServerURL)
 	fail := func(code string) (ClientStatus, error) {
 		storeErr := withConnection(func(f *connectionFile) (bool, error) {
 			if f.ServerURL != s.ServerURL || f.ProviderID != s.ProviderID {
