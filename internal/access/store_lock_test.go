@@ -90,20 +90,6 @@ func TestAccessRejectsUnavailableLock(t *testing.T) {
 	}
 }
 
-func TestAccessRestoreRefusesCorruptStore(t *testing.T) {
-	storeFixture(t)
-	if err := os.WriteFile(Path(), []byte("broken"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := Restore(nil); err == nil {
-		t.Error("restore overwrote an unknown store")
-	}
-	b, err := os.ReadFile(Path())
-	if err != nil || string(b) != "broken" {
-		t.Fatal("corrupt store overwritten")
-	}
-}
-
 // Each worker is the same test executable with the parent's isolated HOME
 // and config. Pipes establish readiness and release; no startup sleeps.
 type storeChild struct {

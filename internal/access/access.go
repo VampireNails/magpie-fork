@@ -21,6 +21,7 @@ import (
 
 	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/filelock"
+	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/settings"
 )
 
@@ -324,14 +325,19 @@ func Export() ([]Key, error) {
 	return load()
 }
 
-// Restore replaces the gateway credentials when restoring their settings.
+// Restore explicitly replaces all gateway credentials from a backup. A nil
+// slice is an empty replacement, as in older backups. Unlike ordinary updates,
+// it can repair a damaged store, keeping the damaged bytes aside first.
 func Restore(keys []Key) error {
 	if err := lockStore(context.Background()); err != nil {
 		return err
 	}
 	defer mu.Unlock()
-	// Refuse to overwrite an unreadable or damaged store.
-	if _, err := load(); err != nil {
+	// Validate the supplied replacement before preserving or changing state.
+	if _, err := json.Marshal(keys); err != nil {
+		return err
+	}
+	if err := lastgood.KeepUnparsed(Path(), lastgood.Into[[]Key]); err != nil {
 		return err
 	}
 	return save(slices.Clone(keys))
