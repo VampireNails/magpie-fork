@@ -109,12 +109,13 @@ func ownSecret(secret string, keys []Key) (string, error) {
 }
 
 type Key struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Off    bool   `json:"off,omitempty"`
-	LAN    bool   `json:"lan,omitempty"` // default key and durable migration marker
-	Secret string `json:"secret,omitempty"`
-	Masked string `json:"masked,omitempty"`
+	Device *DeviceMetadata `json:"device,omitempty"`
+	ID     string          `json:"id"`
+	Name   string          `json:"name"`
+	Off    bool            `json:"off,omitempty"`
+	LAN    bool            `json:"lan,omitempty"` // default key and durable migration marker
+	Secret string          `json:"secret,omitempty"`
+	Masked string          `json:"masked,omitempty"`
 	// Limit is the key's own budget (#585); nil for none.
 	Limit *Limit `json:"limit,omitempty"`
 	// More are its limits after the first (#2227), each a window of its

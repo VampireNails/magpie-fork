@@ -413,3 +413,5 @@ real `~/.codex`, `~/.claude`, `~/.config/gcloud` or `~/.config/magpie` files.
 Vertex AI's tests send Vertex AI, Google's token endpoint and IAM Credentials
 to a server of their own (`VertexForTest`). Check a change
 against real accounts in a sandbox HOME, as [Code standards](../code-standards.md#acceptance-criteria) describes.
+
+- Device registration uses the existing gateway key store: `access.EnsureDevice` identifies a node by its verified StableNodeID, updates its name and last-seen timestamp, and restores its unrestricted gateway key settings. Its credential result is for trusted registration only; `access.List` and `access.ListDevices` do not return its secret. `access.RemoveDevice` deletes a device key idempotently, and a later registration makes a new key. Reads that fail never become empty stores. `access.Export` remains reserved for the encrypted backup bundle. The existing file lock's timeout and unsupported-filesystem fallback apply to these operations too.
