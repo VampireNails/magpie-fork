@@ -3,8 +3,11 @@ package remotejoin
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -109,5 +112,42 @@ func TestPeerLocalAPITimeout(t *testing.T) {
 	_, err := r.Resolve(context.Background(), req)
 	if !errors.Is(err, ErrIdentityUnavailable) {
 		t.Fatal("timeout must be retryable identity lookup failure")
+	}
+}
+
+func TestPeerBoundsRepliesAndRefusesLocalAPIRedirects(t *testing.T) {
+	for _, body := range []string{strings.Repeat("x", (256<<10)+1), `{"Node":{"StableID":"node","ID":0,"ComputedName":"name"}}`, `{"Node":{"StableID":"node","ID":1}}`} {
+		r := localFixture(t, 200, body)
+		req := peerRequest(true)
+		_, err := r.Resolve(req.Context(), req)
+		if err == nil {
+			t.Error("invalid or oversized whois reply accepted")
+		}
+	}
+	var calls atomic.Int32
+	c := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: 302, Header: http.Header{"Location": []string{"https://outside.invalid/secret-canary"}}, Body: io.NopCloser(strings.NewReader("secret-canary")), Request: r}, nil
+	})}
+	r := NewLocalAPIResolver(c, time.Second)
+	req := peerRequest(true)
+	_, err := r.Resolve(req.Context(), req)
+	if !errors.Is(err, ErrIdentityUnavailable) || calls.Load() != 1 || strings.Contains(err.Error(), "secret-canary") {
+		t.Fatal("redirect escaped LocalAPI boundary")
+	}
+}
+
+func TestPeerResolveTransportFailureAndMissingSource(t *testing.T) {
+	c := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, errors.New("secret-canary") })}
+	r := NewLocalAPIResolver(c, time.Second)
+	req := peerRequest(true)
+	_, err := r.Resolve(req.Context(), req)
+	if !errors.Is(err, ErrIdentityUnavailable) || strings.Contains(err.Error(), "secret-canary") {
+		t.Fatal("transport failure was unsafe")
+	}
+	req.Header.Del("X-Forwarded-For")
+	_, err = r.Resolve(req.Context(), req)
+	if !errors.Is(err, ErrIdentityRequired) {
+		t.Fatal("missing trusted source must require identity")
 	}
 }
