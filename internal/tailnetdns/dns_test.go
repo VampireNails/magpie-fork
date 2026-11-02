@@ -17,11 +17,11 @@ func TestFallbackUsesMatchedNodeAndVerifiesTLS(t *testing.T) {
 	_, port, _ := net.SplitHostPort(s.Listener.Addr().String())
 	old := lookup
 	defer func() { lookup = old; SetTarget("") }()
-	lookup = func(_ context.Context, host string) (string, error) {
+	lookup = func(_ context.Context, host string) ([]string, error) {
 		if host != "example.com" {
 			t.Error("unexpected target")
 		}
-		return "127.0.0.1", nil
+		return []string{"127.0.0.1"}, nil
 	}
 	SetTarget(net.JoinHostPort("example.com", port))
 	orig := s.Client().Transport.(*http.Transport).Clone()
@@ -64,7 +64,7 @@ func TestFallbackNeverUsesOtherHost(t *testing.T) {
 	defer func() { lookup = old; SetTarget("") }()
 	SetTarget("known.example.ts.net")
 	called := false
-	lookup = func(context.Context, string) (string, error) { called = true; return "100.64.1.1", nil }
+	lookup = func(context.Context, string) ([]string, error) { called = true; return []string{"100.64.1.1"}, nil }
 	dial := Wrap(func(context.Context, string, string) (net.Conn, error) {
 		return nil, &net.DNSError{Err: "not found", Name: "other", IsNotFound: true}
 	})

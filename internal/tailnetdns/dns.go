@@ -67,22 +67,41 @@ func Wrap(d dialFn) dialFn {
 		if !errors.As(err, &dns) {
 			return nil, err
 		}
-		ip, e := lookup(ctx, strings.TrimSuffix(strings.ToLower(host), "."))
+		ips, e := lookup(ctx, strings.TrimSuffix(strings.ToLower(host), "."))
 		if e != nil {
 			return nil, e
 		}
-		return d(ctx, network, net.JoinHostPort(ip, port))
+		var last error = ErrMappingUnavailable
+		attempts := 0
+		for _, raw := range ips {
+			ip, e := netip.ParseAddr(raw)
+			if e != nil || (network == "tcp4" && !ip.Is4()) || (network == "tcp6" && !ip.Is6()) {
+				continue
+			}
+			if attempts >= 16 {
+				break
+			}
+			attempts++
+			c, last = d(ctx, network, net.JoinHostPort(raw, port))
+			if last == nil {
+				return c, nil
+			}
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+		}
+		return nil, last
 	}
 }
 
 var lookup = lookupStatus
 
-func lookupStatus(ctx context.Context, host string) (string, error) {
+func lookupStatus(ctx context.Context, host string) ([]string, error) {
 	nodes, err := statusNodes(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return match(nodes, host)
+	return matchAll(nodes, host)
 }
 
 // NameForIP only returns a certificate hostname from local Tailscale state.
@@ -100,28 +119,30 @@ func NameForIP(ctx context.Context, raw string) (string, error) {
 
 func nameForIP(nodes []node, ip netip.Addr) (string, error) {
 	var name string
+	owners := 0
 	for _, n := range nodes {
-		candidate := strings.TrimSuffix(strings.ToLower(n.DNSName), ".")
-		if !strings.HasSuffix(candidate, ".ts.net") {
-			continue
-		}
-		for _, address := range n.TailscaleIPs {
-			v, e := netip.ParseAddr(address)
-			if e == nil && v == ip {
-				if name != "" && name != candidate {
-					return "", ErrMappingUnavailable
-				}
-				name = candidate
+		for _, raw := range n.TailscaleIPs {
+			v, err := netip.ParseAddr(raw)
+			if err == nil && v == ip {
+				owners++
+				name = strings.TrimSuffix(strings.ToLower(n.DNSName), ".")
+				break
 			}
 		}
 	}
-	if name == "" {
+	if owners != 1 || !strings.HasSuffix(name, ".ts.net") {
 		return "", ErrMappingUnavailable
 	}
-	if mapped, e := match(nodes, name); e != nil || mapped != ip.String() {
-		return "", ErrMappingUnavailable
+	ips, err := matchAll(nodes, name)
+	if err != nil {
+		return "", err
 	}
-	return name, nil
+	for _, raw := range ips {
+		if raw == ip.String() {
+			return name, nil
+		}
+	}
+	return "", ErrMappingUnavailable
 }
 
 func statusNodes(ctx context.Context) ([]node, error) {
@@ -168,29 +189,53 @@ type node struct {
 }
 
 func match(nodes []node, host string) (string, error) {
-	var found string
-	for _, n := range nodes {
-		name := strings.TrimSuffix(strings.ToLower(n.DNSName), ".")
+	ips, err := matchAll(nodes, host)
+	if err != nil {
+		return "", err
+	}
+	return ips[0], nil
+}
+
+func matchAll(nodes []node, host string) ([]string, error) {
+	var owner *node
+	for i := range nodes {
+		name := strings.TrimSuffix(strings.ToLower(nodes[i].DNSName), ".")
 		if name != host || !strings.HasSuffix(name, ".ts.net") {
 			continue
 		}
-		for _, raw := range n.TailscaleIPs {
-			ip, e := netip.ParseAddr(raw)
-			if e != nil || !tailIP(ip) {
+		if owner != nil {
+			return nil, ErrMappingUnavailable
+		}
+		owner = &nodes[i]
+	}
+	if owner == nil {
+		return nil, ErrMappingUnavailable
+	}
+	var ips []string
+	for _, raw := range owner.TailscaleIPs {
+		ip, err := netip.ParseAddr(raw)
+		if err != nil || !tailIP(ip) {
+			continue
+		}
+		for i := range nodes {
+			if &nodes[i] == owner {
 				continue
 			}
-			if found != "" && found != ip.String() {
-				return "", ErrMappingUnavailable
+			for _, other := range nodes[i].TailscaleIPs {
+				v, e := netip.ParseAddr(other)
+				if e == nil && v == ip {
+					return nil, ErrMappingUnavailable
+				}
 			}
-			found = ip.String()
-			break
 		}
+		ips = append(ips, ip.String())
 	}
-	if found == "" {
-		return "", ErrMappingUnavailable
+	if len(ips) == 0 {
+		return nil, ErrMappingUnavailable
 	}
-	return found, nil
+	return ips, nil
 }
+
 func tailIP(ip netip.Addr) bool {
 	return netip.MustParsePrefix("100.64.0.0/10").Contains(ip) || netip.MustParsePrefix("fd7a:115c:a1e0::/48").Contains(ip)
 }
