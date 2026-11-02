@@ -49,19 +49,31 @@ func hermes(home string) *Agent { return hermesIn(here(home)) }
 // hermesIn is Hermes at a place: this machine's home, or a WSL distro's
 // (see wsl.go), where HERMES_HOME isn't read and its provider names the
 // gateway as the distro reaches it.
-func hermesIn(at place) *Agent {
+func hermesIn(at place) *Agent { return hermesInScoped(at, nil, nil) }
+
+// hermesInScoped binds a write capability only to this short-lived connector.
+func hermesInScoped(at place, before func(string) error, beforeEnv func(string, string) error) *Agent {
 	dir := hermesActive(at)
 	path := filepath.Join(dir, "config.yaml")
-	hermesProvider := func(p string) any { return hermesKept(at, p, hermesProviderAt(at.gw())) }
+	hermesProvider := func(p string) (any, error) { return hermesKeptScoped(at, p, hermesProviderAt(at.gw()), beforeEnv) }
 	// spread puts magpie's provider, as it is now, into every other
 	// profile's config beside the one magpie connects
 	spread := func() error {
 		var errs []error
 		for _, p := range hermesOthers(at, dir) {
+			if before != nil {
+				if err := before(p); err != nil {
+					return err
+				}
+			}
+			value, err := hermesProvider(p)
+			if err != nil {
+				return err
+			}
 			if edit.GetYAMLMap(p, "providers."+magpieID) != nil {
-				errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { return hermesProvider(p) }))
+				errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { return value }))
 			} else {
-				errs = append(errs, edit.SetYAML(p, edit.KV{Path: "providers." + magpieID, Value: hermesProvider(p)}))
+				errs = append(errs, edit.SetYAML(p, edit.KV{Path: "providers." + magpieID, Value: value}))
 			}
 		}
 		return errors.Join(errs...)
@@ -102,7 +114,38 @@ func hermesIn(at place) *Agent {
 		UA:  []string{"hermes-agent"},
 		Bin: "hermes", Dir: dir, Path: path,
 		Sync: func() error {
-			if err := syncYAML(path, "providers."+magpieID, func() any { return hermesProvider(path) }); err != nil {
+			if before != nil {
+				if err := before(path); err != nil {
+					return err
+				}
+			}
+			if before == nil {
+				if err := syncYAML(path, "providers."+magpieID, func() any { value, _ := hermesProvider(path); return value }); err != nil {
+					return err
+				}
+				if joined() {
+					return spread()
+				}
+				var errs []error
+				for _, p := range hermesOthers(at, dir) {
+					if edit.GetYAMLMap(p, "providers."+magpieID) != nil {
+						errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { value, _ := hermesProvider(p); return value }))
+					}
+				}
+				return errors.Join(errs...)
+			}
+			var value any
+			if raw, exists := edit.GetYAMLText(path, "providers."+magpieID); exists {
+				var decoded any
+				if yaml.Unmarshal([]byte(raw), &decoded) == nil && decoded != nil {
+					var err error
+					value, err = hermesProvider(path)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			if err := syncYAML(path, "providers."+magpieID, func() any { return value }); err != nil {
 				return err
 			}
 			if joined() {
@@ -112,8 +155,17 @@ func hermesIn(at place) *Agent {
 			// provider current while the connected config isn't
 			var errs []error
 			for _, p := range hermesOthers(at, dir) {
+				if before != nil {
+					if err := before(p); err != nil {
+						return err
+					}
+				}
 				if edit.GetYAMLMap(p, "providers."+magpieID) != nil {
-					errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { return hermesProvider(p) }))
+					value, err := hermesProvider(p)
+					if err != nil {
+						return err
+					}
+					errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { return value }))
 				}
 			}
 			return errors.Join(errs...)
@@ -128,6 +180,9 @@ func hermesIn(at place) *Agent {
 		// Disconnect takes magpie's provider out; the model, when it is
 		// magpie's, goes back by the field
 		Unwire: func() error {
+			if before != nil {
+				return ErrManagedInvalid
+			}
 			var errs []error
 			// the model the user had in the connected config, which a bot
 			// on magpie goes onto, read before the field's Set puts it back
@@ -181,6 +236,11 @@ func hermesIn(at place) *Agent {
 				return v
 			},
 			Set: func(v string) error {
+				if before != nil {
+					if err := before(path); err != nil {
+						return err
+					}
+				}
 				if v == "" {
 					if onMagpie() {
 						return restore()
@@ -204,15 +264,28 @@ func hermesIn(at place) *Agent {
 							key + "model.default":  getKey("model.default"),
 						})
 					}
+					value, err := hermesProvider(path)
+					if err != nil {
+						return err
+					}
 					if err := edit.SetYAML(path,
-						edit.KV{Path: "providers." + magpieID, Value: hermesProvider(path)},
+						edit.KV{Path: "providers." + magpieID, Value: value},
 						edit.KV{Path: "model.provider", Value: magpieID},
 						edit.KV{Path: "model.default", Value: ref},
 					); err != nil {
 						return err
 					}
 					stash(map[string]string{setKey: ref})
-					return errors.Join(spread(), hermesBack(at, dir, ref), hermesFollow(at, dir, was, now, ref))
+					if before == nil {
+						return errors.Join(spread(), hermesBackScoped(at, dir, ref, nil), hermesFollowScoped(at, dir, was, now, ref, nil))
+					}
+					if err := spread(); err != nil {
+						return err
+					}
+					if err := hermesBackScoped(at, dir, ref, before); err != nil {
+						return err
+					}
+					return hermesFollowScoped(at, dir, was, now, ref, before)
 				}
 				if onMagpie() {
 					if err := restore(); err != nil {
@@ -230,6 +303,11 @@ func hermesIn(at place) *Agent {
 			Key: "effort", Label: "effort",
 			Get: func() string { return getKey("agent.reasoning_effort") },
 			Set: func(v string) error {
+				if before != nil {
+					if err := before(path); err != nil {
+						return err
+					}
+				}
 				if v == "" {
 					return edit.DelYAML(path, "agent.reasoning_effort")
 				}
@@ -240,7 +318,7 @@ func hermesIn(at place) *Agent {
 			},
 		}},
 	}
-	a.Fields = append(a.Fields, hermesProfileFields(at, dir, hermesProvider)...)
+	a.Fields = append(a.Fields, hermesProfileFields(at, dir, hermesProvider, before)...)
 	return a
 }
 
@@ -258,7 +336,7 @@ const hermesProfileKey = "profile:"
 // profile stays on it when the connected config's model changes
 // (hermesFollow). Unset puts back the model it had before magpie, and a
 // profile nobody picks for here keeps what it has.
-func hermesProfileFields(at place, dir string, provider func(string) any) []Field {
+func hermesProfileFields(at place, dir string, provider func(string) (any, error), before func(string) error) []Field {
 	root := filepath.Clean(hermesRoot(at))
 	var out []Field
 	for _, p := range hermesOthers(at, dir) {
@@ -277,13 +355,22 @@ func hermesProfileFields(at place, dir string, provider func(string) any) []Fiel
 				return m.Default
 			},
 			Set: func(v string) error {
+				if before != nil {
+					if err := before(p); err != nil {
+						return err
+					}
+				}
 				cur := hermesModelOf(p)
 				if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
 					if cur.Provider != magpieID {
 						stash(map[string]string{k + "model.provider": cur.Provider, k + "model.default": cur.Default})
 					}
+					value, err := provider(p)
+					if err != nil {
+						return err
+					}
 					if err := edit.SetYAML(p,
-						edit.KV{Path: "providers." + magpieID, Value: provider(p)},
+						edit.KV{Path: "providers." + magpieID, Value: value},
 						edit.KV{Path: "model.provider", Value: magpieID},
 						edit.KV{Path: "model.default", Value: ref},
 					); err != nil {
@@ -449,7 +536,7 @@ func hermesOthers(at place, dir string) []string {
 // reads it again, so without this each bot stayed on the model magpie set
 // when it was made. A profile on another model, magpie's or its own, was
 // set there by its user and is left alone.
-func hermesFollow(at place, dir, was, now, ref string) error {
+func hermesFollowScoped(at place, dir, was, now, ref string, before func(string) error) error {
 	from := func(v string) bool { return v != "" && v != ref && (v == was || v == now) }
 	if !from(was) && !from(now) {
 		return nil
@@ -471,6 +558,11 @@ func hermesFollow(at place, dir, was, now, ref string) error {
 		// one picked for this profile on the Agents page is the user's
 		// (hermesProfileFields)
 		if from(v) && picked["hermes:"+p+":picked"] != v {
+			if before != nil {
+				if err := before(p); err != nil {
+					return err
+				}
+			}
 			errs = append(errs, edit.SetYAML(p, edit.KV{Path: k, Value: ref}))
 		}
 	}
@@ -579,9 +671,14 @@ func hermesEntry(path, name string) any {
 // changed it since. A profile with no model at all (one an older magpie's
 // Disconnect emptied, or made from a config with none), which `hermes`
 // can't start in, gets ref, the one magpie sets, as Hermes would seed it.
-func hermesBack(at place, dir, ref string) error {
+func hermesBackScoped(at place, dir, ref string, before func(string) error) error {
 	var errs []error
 	for _, p := range hermesOthers(at, dir) {
+		if before != nil {
+			if err := before(p); err != nil {
+				return err
+			}
+		}
 		cur := hermesModelOf(p)
 		var off hermesOff
 		if raw := unstash(hermesOffKey(p)); raw != "" && json.Unmarshal([]byte(raw), &off) == nil && off.Magpie.Default != "" {
@@ -632,12 +729,16 @@ func hermesProviderAt(gw string) hermesProviderEntry {
 // as does a name of their own and a header beside magpie's User-Agent; the
 // address, key, API mode and model list are magpie's (#2030), but for a
 // key the user keeps as a reference to a variable (hermesKeptKey).
-func hermesKept(at place, path string, e hermesProviderEntry) any {
-	e.APIKey = hermesKeptKey(at, path, e.APIKey)
+func hermesKeptScoped(at place, path string, e hermesProviderEntry, before func(string, string) error) (any, error) {
+	var err error
+	e.APIKey, err = hermesKeptKeyScoped(at, path, e.APIKey, before)
+	if err != nil {
+		return nil, err
+	}
 	if name, ok := edit.GetYAML(path, "providers."+magpieID+".name"); ok && strings.TrimSpace(name) != "" {
 		e.Name = name
 	}
-	return yamlKept(path, "providers."+magpieID, e, "base_url", "api_key", "api_mode", "models")
+	return yamlKept(path, "providers."+magpieID, e, "base_url", "api_key", "api_mode", "models"), nil
 }
 
 // hermesEnvRef is a reference in a value of Hermes's config.yaml, which
@@ -702,28 +803,40 @@ func hermesKey(at place, path, v string) (key string, known bool) {
 // beside the config under its variable, which Hermes reads over the
 // environment; a value with more than the one reference in it is magpie's
 // key again.
-func hermesKeptKey(at place, path, want string) string {
+func hermesKeptKeyScoped(at place, path, want string, before func(string, string) error) (string, error) {
 	raw, _ := edit.GetYAML(path, "providers."+magpieID+".api_key")
 	if !hermesEnvRef.MatchString(raw) {
-		return want
+		return want, nil
 	}
 	if key, known := hermesKey(at, path, raw); !known || keyHolds(key, want) {
-		return raw
+		return raw, nil
 	}
 	m := hermesEnvRef.FindStringSubmatch(raw)
 	name := hermesRefVar(m[1])
 	if m[0] != strings.TrimSpace(raw) || name == "" {
-		return want
+		return want, nil
+	}
+	if before != nil {
+		if err := before(hermesEnvFile(path), name); err != nil {
+			return "", err
+		}
 	}
 	// a .env made here holds a key, so only its owner reads it, as
 	// Hermes writes its own (_write_env_lines)
 	if f, err := os.OpenFile(hermesEnvFile(path), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600); err == nil {
-		f.Close()
+		if err := f.Close(); err != nil && before != nil {
+			return "", err
+		}
+	} else if before != nil && !errors.Is(err, os.ErrExist) {
+		return "", err
 	}
-	if edit.SetEnvFile(hermesEnvFile(path), edit.KV{Path: name, Value: want}) != nil {
-		return want
+	if err := edit.SetEnvFile(hermesEnvFile(path), edit.KV{Path: name, Value: want}); err != nil {
+		if before != nil {
+			return "", err
+		}
+		return want, nil
 	}
-	return raw
+	return raw, nil
 }
 
 // what hermes says after a change (notice.go)
