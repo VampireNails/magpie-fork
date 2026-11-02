@@ -55,7 +55,8 @@ func webCmd(args []string) error {
 	// it serves, is the one to open
 	if a, k := daemon.Web(); a != "" && gateway.ServedBy().Running {
 		link := webLink(a, k)
-		fmt.Println(green.Render("●"), "the magpie service serves this page:", bold.Render(link))
+		fmt.Println(green.Render("●"), "the magpie service serves this page:", bold.Render(webAddress(link)))
+		fmt.Println(muted.Render("  magpie daemon web shows its private sign-in link"))
 		fmt.Println(muted.Render("  magpie daemon web off turns it off"))
 		if open {
 			openInBrowser(link)
@@ -66,12 +67,16 @@ func webCmd(args []string) error {
 	// and sharing › Browser access): its own is the one to open
 	if a, k := gui.AppPage(); a != "" && samePort(a, addr) && answers(a) {
 		link := webLink(a, k)
-		fmt.Println(green.Render("●"), "the magpie app serves this page:", bold.Render(link))
+		fmt.Println(green.Render("●"), "the magpie app serves this page:", bold.Render(webAddress(link)))
+		fmt.Println(muted.Render("  the Web key is in Settings › Network and sharing › Browser access"))
 		fmt.Println(muted.Render("  Settings › Network and sharing › Browser access turns it off"))
 		if open {
 			openInBrowser(link)
 		}
 		return nil
+	}
+	if !open && os.Getenv("MAGPIE_WEB_KEY") == "" {
+		return fmt.Errorf("magpie web --no-open: set MAGPIE_WEB_KEY before starting, then paste it into the page to sign in; startup output does not show credentials")
 	}
 	// what this page's gateway starts (agents, MCP servers) gets the node a
 	// version manager put on PATH only in the shell's profile, as the app's
@@ -123,30 +128,39 @@ func answers(addr string) bool {
 	return true
 }
 
-// printWeb prints where a started page is, and what its link carries.
+// webAddress is a page's public address, never its private sign-in link.
+func webAddress(link string) string {
+	u, err := url.Parse(link)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "(invalid page address)"
+	}
+	u.User, u.RawQuery, u.Fragment = nil, "", ""
+	return u.String()
+}
+
+// printWeb prints addresses and sign-in guidance, never credentials.
 func printWeb(w *gui.Web) {
-	fmt.Println(green.Render("●"), "magpie web on", bold.Render(w.Link))
+	fmt.Println(green.Render("●"), "magpie web on", bold.Render(webAddress(w.Link)))
 	if l := tlsLine(); l != "" {
 		fmt.Println(l)
 	}
 	host, port, _ := net.SplitHostPort(w.Addr)
-	key := w.Link[strings.Index(w.Link, "/?k="):]
 	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
-		for _, l := range gui.NetworkLinks(port, key) {
-			fmt.Println(muted.Render("  on the network"), l)
+		for _, l := range gui.NetworkLinks(port, "/") {
+			fmt.Println(muted.Render("  on the network"), webAddress(l))
 		}
 		if gateway.ContainerAddrs() {
 			fmt.Println(muted.Render("  " + containerNote))
 		}
 		fmt.Println(amber.Render("!"), lanWarning())
-	} else if l := proxyLink(key); l != "" {
-		fmt.Println(muted.Render("  through your proxy"), l)
+	} else if l := proxyLink("/"); l != "" {
+		fmt.Println(muted.Render("  through your proxy"), webAddress(l))
 	}
-	carries := "this run's key (MAGPIE_WEB_KEY keeps one across runs)"
+	signIn := "the browser opens with this run's private key; set MAGPIE_WEB_KEY before starting for headless access"
 	if os.Getenv("MAGPIE_WEB_KEY") != "" {
-		carries = "MAGPIE_WEB_KEY"
+		signIn = "paste your configured MAGPIE_WEB_KEY into the page to sign in"
 	}
-	fmt.Println(muted.Render("  the link carries " + carries + " · gateway " + advertisedURL() + " · Ctrl-C to stop"))
+	fmt.Println(muted.Render("  " + signIn + " · gateway " + advertisedURL() + " · Ctrl-C to stop"))
 }
 
 // lanWarning is said wherever the page is served on the network.
@@ -226,6 +240,9 @@ func serveCmd(args []string) error {
 	proc.UserPath() // as magpie web's (#3803)
 	if web == "" {
 		return serve()
+	}
+	if os.Getenv("MAGPIE_WEB_KEY") == "" {
+		return fmt.Errorf("magpie serve --web: set MAGPIE_WEB_KEY before starting, then paste it into the page to sign in; startup output does not show credentials")
 	}
 	go stats.Run(version, "serve")
 	w, err := gui.StartWeb(web, version)

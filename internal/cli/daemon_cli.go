@@ -254,19 +254,30 @@ func daemonInstall(w daemonWeb) error {
 	return daemon.Install(o)
 }
 
-// printDaemonWeb prints the service's page: its link, and on the network
-// its links there and what that lets anyone with one do.
+// printDaemonWeb is ordinary status/install output, never a credential view.
 func printDaemonWeb(addr, key string) {
-	fmt.Println(muted.Render("  page   "), webLink(addr, key))
+	printDaemonPage(addr, key, false)
+	fmt.Println(muted.Render("  magpie daemon web shows its private sign-in link"))
+}
+
+// printDaemonPage reveals credentials only for the explicit daemon web command.
+func printDaemonPage(addr, key string, private bool) {
+	link := func(l string) string {
+		if private {
+			return l
+		}
+		return webAddress(l)
+	}
+	fmt.Println(muted.Render("  page   "), link(webLink(addr, key)))
 	host, port, _ := net.SplitHostPort(addr)
 	q := "/?k=" + key
 	if ip := net.ParseIP(host); host == "" || ip != nil && !ip.IsLoopback() {
 		for _, l := range gui.NetworkLinks(port, q) {
-			fmt.Println(muted.Render("  on the network"), l)
+			fmt.Println(muted.Render("  on the network"), link(l))
 		}
 		fmt.Println(amber.Render("!"), lanWarning())
 	} else if l := proxyLink(q); l != "" {
-		fmt.Println(muted.Render("  through your proxy"), l)
+		fmt.Println(muted.Render("  through your proxy"), link(l))
 	}
 }
 
@@ -285,7 +296,7 @@ func daemonWebStatus() error {
 		fmt.Println("the magpie service serves no page ·", muted.Render("magpie daemon web on"))
 		return nil
 	}
-	printDaemonWeb(a, k)
+	printDaemonPage(a, k, true)
 	return nil
 }
 

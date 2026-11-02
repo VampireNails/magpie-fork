@@ -1,6 +1,8 @@
 package gui
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,6 +10,58 @@ import (
 	"testing"
 	"time"
 )
+
+func TestWebRefusalKeepsRequestCredentialsPrivate(t *testing.T) {
+	const key = "fake-admin-key-0123456789"
+	const secret = "fake-gateway-secret-987654321"
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	h := webServed("3430", key, 0, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) }))
+	for _, target := range []string{"/?token=" + secret, "/" + secret, "/?k=wrong-" + secret} {
+		r := httptest.NewRequest("GET", "http://127.0.0.1:3430"+target, nil)
+		r.RemoteAddr = "127.0.0.1:12345"
+		r.Header.Set("Accept", "text/html")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("request without credentials got %d", w.Code)
+		}
+		if strings.Contains(w.Body.String(), secret) || strings.Contains(w.Body.String(), key) || strings.Contains(logs.String(), secret) {
+			t.Error("refusal page or diagnostic log echoed request credentials")
+		}
+	}
+	form := url.Values{"key": {"wrong-" + secret}, "back": {"/?k=" + key + "&token=" + secret}}
+	r := httptest.NewRequest("POST", "http://127.0.0.1:3430"+webSignInPath, strings.NewReader(form.Encode()))
+	r.RemoteAddr = "127.0.0.1:12345"
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), secret) || strings.Contains(w.Body.String(), key) {
+		t.Error("failed form sign-in echoed credentials from its return address")
+	}
+	// The same form still signs in with the real Web key, and the cookie
+	// still grants management access; a gateway key is never substituted.
+	form.Set("key", key)
+	form.Set("back", "/")
+	r = httptest.NewRequest("POST", "http://127.0.0.1:3430"+webSignInPath, strings.NewReader(form.Encode()))
+	r.RemoteAddr = "127.0.0.1:12345"
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusSeeOther || len(w.Result().Cookies()) != 1 {
+		t.Fatal("the known Web key did not sign in")
+	}
+	r = httptest.NewRequest("GET", "http://127.0.0.1:3430/", nil)
+	r.RemoteAddr = "127.0.0.1:12345"
+	r.AddCookie(w.Result().Cookies()[0])
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusTeapot {
+		t.Fatal("sign-in cookie did not reach the management handler")
+	}
+}
 
 func TestWebGuard(t *testing.T) {
 	h := webGuard("c", "key", 0, http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) { rw.WriteHeader(http.StatusTeapot) }))
@@ -109,7 +163,7 @@ func TestWebGuardBookmark(t *testing.T) {
 	// no cookie: a form, saying none was sent, and never the key
 	rec := do(page(""))
 	body := rec.Body.String()
-	if rec.Code != http.StatusUnauthorized || !strings.Contains(body, "sent no sign-in cookie") || !strings.Contains(body, `action="`+webSignInPath+`"`) || !strings.Contains(body, `value="/?view=usage"`) || strings.Contains(body, key) {
+	if rec.Code != http.StatusUnauthorized || !strings.Contains(body, "sent no sign-in cookie") || !strings.Contains(body, `action="`+webSignInPath+`"`) || !strings.Contains(body, `value="/"`) || strings.Contains(body, key) {
 		t.Fatalf("no cookie: %d %s", rec.Code, body)
 	}
 	// a cookie with another key: says so

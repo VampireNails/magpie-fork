@@ -126,9 +126,8 @@ func TestWebOptions(t *testing.T) {
 	}
 }
 
-// magpie daemon status and magpie daemon web print the page's link, with
-// the key, read from the service's file, and say the page is open to
-// anyone with the link when it is served on the network.
+// Only the explicit magpie daemon web command reveals the service's
+// private link; ordinary status shows the page address and retrieval command.
 func TestDaemonStatusPrintsPage(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("systemd and launchd only")
@@ -153,8 +152,9 @@ func TestDaemonStatusPrintsPage(t *testing.T) {
 	}
 	for _, args := range [][]string{{"daemon", "status"}, {"daemon", "web"}} {
 		out, err := runOut(t, args...)
-		if err != nil || !strings.Contains(out, "http://127.0.0.1:3430/?k="+key) || !strings.Contains(out, "anyone with the link") {
-			t.Errorf("%q: %q, %v", args, out, err)
+		private := args[1] == "web"
+		if err != nil || !strings.Contains(out, "http://127.0.0.1:3430/") || strings.Contains(out, key) != private || strings.Contains(out, "?k=") != private {
+			t.Errorf("%q: page address or credential visibility was wrong: %v", args, err)
 		}
 	}
 }
