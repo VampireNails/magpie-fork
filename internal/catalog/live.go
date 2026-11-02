@@ -32,9 +32,10 @@ func LivePath(provider string) string {
 }
 
 type liveFile struct {
-	Fetched time.Time `json:"fetched"`
-	Base    string    `json:"base"`
-	Models  []Model   `json:"models"`
+	CompleteEmpty bool      `json:"completeEmpty,omitempty"`
+	Fetched       time.Time `json:"fetched"`
+	Base          string    `json:"base"`
+	Models        []Model   `json:"models"`
 	// Sides, for a provider whose protocols are served at bases of their
 	// own, is what each of those bases listed, before the lists were
 	// merged into Models. A base that can't be asked keeps its own part
@@ -120,7 +121,7 @@ func Live(provider string) (models []Model, fetched time.Time, ok bool) {
 		return nil, time.Time{}, false
 	}
 	ms := Chat(f.Models)
-	if len(ms) == 0 {
+	if len(ms) == 0 && !f.CompleteEmpty {
 		return nil, time.Time{}, false
 	}
 	return ms, f.Fetched, true
@@ -212,9 +213,17 @@ func SaveLiveSidesQuiet(provider, base string, models []Model, sides map[string]
 	return saveLiveSides(provider, base, models, sides, false)
 }
 
+func SaveRemoteLive(provider, base string, models []Model, sides map[string][]Model, notify bool) error {
+	return saveLiveSidesWithEmpty(provider, base, models, sides, notify, true)
+}
+
 func saveLiveSides(provider, base string, models []Model, sides map[string][]Model, notify bool) error {
+	return saveLiveSidesWithEmpty(provider, base, models, sides, notify, false)
+}
+
+func saveLiveSidesWithEmpty(provider, base string, models []Model, sides map[string][]Model, notify, allowEmpty bool) error {
 	p := LivePath(provider)
-	if len(models) == 0 {
+	if len(models) == 0 && !allowEmpty {
 		err := os.Remove(p)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -231,7 +240,7 @@ func saveLiveSides(provider, base string, models []Model, sides map[string][]Mod
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(liveFile{Fetched: time.Now(), Base: base, Models: models, Sides: sides}, "", "  ")
+	b, _ := json.MarshalIndent(liveFile{Fetched: time.Now(), Base: base, Models: models, Sides: sides, CompleteEmpty: allowEmpty && len(models) == 0}, "", "  ")
 	write := os.WriteFile
 	if !notify {
 		write = steady.WriteFile
@@ -319,6 +328,14 @@ var ErrAsked = errors.New("every list of this base was already asked for this ke
 // refused under the next, so the Gemini list of a base whose Chat request
 // was answered 401 is asked, with x-goog-api-key, instead of being taken
 // for a list already had.
+type remoteListKey struct{}
+
+// RemoteListContext requires a complete native Remote magpie list.
+func RemoteListContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, remoteListKey{}, true)
+}
+func isRemoteList(ctx context.Context) bool { return ctx.Value(remoteListKey{}) == true }
+
 func FetchAtListed(ctx context.Context, base, key string, anthropic bool, headers map[string]string, listed *Listed) ([]Model, string, error) {
 	base = strings.TrimRight(strings.TrimSpace(base), "/")
 	if base == "" {
@@ -345,8 +362,11 @@ func FetchAtListed(ctx context.Context, base, key string, anthropic bool, header
 	for _, u := range urls {
 		ms, err := fetchOne(ctx, u, key, anthropic, headers)
 		listed.record(auth, u, ms)
-		if err == nil && len(ms) > 0 {
+		if err == nil && (len(ms) > 0 || isRemoteList(ctx)) {
 			return ms, u, nil
+		}
+		if err != nil && isRemoteList(ctx) {
+			return nil, "", err
 		}
 		if err == nil {
 			err = errors.New(u + ": no models listed")
@@ -596,7 +616,13 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 			return nil, nil, err
 		}
 		defer res.Body.Close()
-		b, _ := io.ReadAll(io.LimitReader(res.Body, 8<<20))
+		b, readErr := io.ReadAll(io.LimitReader(res.Body, (8<<20)+1))
+		if isRemoteList(ctx) && (readErr != nil || len(b) > 8<<20) {
+			return nil, nil, errors.New("model list response unreadable or too large")
+		}
+		if len(b) > 8<<20 {
+			b = b[:8<<20]
+		}
 		return res, b, nil
 	}
 	res, b, err := ask(auth.only)
@@ -624,6 +650,17 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 		}
 		return nil, false, "", fmt.Errorf("%s: %s", url, res.Status)
 	}
+	if isRemoteList(ctx) {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(b, &object) != nil || object == nil || object["error"] != nil {
+			return nil, false, "", errors.New("remote model list: invalid response")
+		}
+		var rows []json.RawMessage
+		data, ok := object["data"]
+		if !ok || string(data) == "null" || json.Unmarshal(data, &rows) != nil || rows == nil {
+			return nil, false, "", errors.New("remote model list: invalid data")
+		}
+	}
 	var v struct {
 		Data    []liveModel `json:"data"`
 		Models  []liveModel `json:"models"`
@@ -642,7 +679,7 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 	}
 	json.Unmarshal(b, &raw)
 	raws := raw.Data
-	if len(rows) == 0 {
+	if len(rows) == 0 && !isRemoteList(ctx) {
 		rows, raws = v.Models, raw.Models
 	}
 	// A list that says it has more is a page of the vendor's catalog, not
@@ -669,6 +706,9 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 			}
 		}
 		if id == "" {
+			if isRemoteList(ctx) {
+				return nil, false, "", errors.New("remote model list: invalid model")
+			}
 			continue
 		}
 		// Another magpie's list is already what its user exposed. Keep

@@ -451,6 +451,9 @@ func (p Provider) fetch(ctx context.Context) ([]catalog.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.IsRemoteMagpie() && quietRemote(ctx) {
+		return catalog.Chat(l.models), catalog.SaveRemoteLive(p.ID, l.base, l.models, l.sides, !quietRemote(ctx))
+	}
 	if quietRemote(ctx) {
 		return catalog.Chat(l.models), catalog.SaveLiveSidesQuiet(p.ID, l.base, l.models, l.sides)
 	}
@@ -711,6 +714,14 @@ type fetched struct {
 // of the agents' model lists and of a model's own protocol setting.
 func (p Provider) fetchOne(ctx context.Context) (fetched, error) {
 	ctx = p.ownRequests(ctx, probelog.KindList) // a detection's list too
+	if p.IsRemoteMagpie() && quietRemote(ctx) {
+		base := p.Base(Chat)
+		ms, u, err := catalog.FetchAtListed(catalog.RemoteListContext(ctx), base, p.Key, false, p.listHeadersAt(base), nil)
+		if err != nil {
+			return fetched{}, err
+		}
+		return fetched{ms, p.fixV1(base, u), nil, nil}, nil
+	}
 	if u := strings.TrimSpace(p.ModelsURL); u != "" {
 		// asked where the user said, and nowhere else: the base URLs
 		// list nothing, or the wrong thing
