@@ -114,3 +114,18 @@ func TestManagedEntryDetachedCatalogDoesNotWriteRememberedAgents(t *testing.T) {
 		})
 	}
 }
+
+func TestManagedEntryDetachedRewireDoesNotCallNativeWriters(t *testing.T) {
+	managedEntryHome(t)
+	managedEntryConfigured(t)
+	for _, id := range []string{"workbuddy", "hermes"} {
+		t.Run(id, func(t *testing.T) {
+			writes := 0
+			a := &Agent{ID: id, Name: id, Join: func() (bool, error) { writes++; return true, nil }, Joined: func() bool { return true }, Sync: func() error { writes++; return nil }}
+			setAgain([]*Agent{a})
+			if writes != 0 {
+				t.Errorf("detached rewire invoked %d native writers", writes)
+			}
+		})
+	}
+}

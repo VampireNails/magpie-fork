@@ -72,6 +72,9 @@ func Rekey(as []*Agent) (moved []string, err error) {
 // magpie, and says the names of those it set and what one failed with.
 func setAgain(as []*Agent) (moved []string, errs []error) {
 	for _, a := range as {
+		if managedEntryBlocked(a) {
+			continue
+		}
 		// set again on the old URL, an agent reads as not routed through
 		// magpie yet, and its set notes the old URL, magpie's token and
 		// model as what it had before magpie: what it really had is kept,
