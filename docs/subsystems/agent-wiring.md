@@ -315,3 +315,33 @@ Settings included, so the form, the saved row and gateway traffic have not
 been tried end to end. As with Cindy and Lody, the TUI leaves the row out
 because there is nothing to pick. `magpie aionui add` opens the link.
 
+
+## Managed session transaction foundation
+
+`ManagedStore` ([managed_session.go](../../internal/agent/managed_session.go),
+[managed_store.go](../../internal/agent/managed_store.go)) is a local-only
+transaction primitive. It is not wired into `Apply`, `Disconnect`, `SyncCatalog`,
+WorkBuddy, or Hermes. Those callers and adapters must be integrated before it
+changes user-visible behavior. The store persists a per-agent schema-versioned
+journal before authorizing a write, retains each target's first snapshot, and
+captures later discovered targets within the same write lease. A restart must
+restore prepared, active, or restoring journals before permitting a new begin.
+Restoration does not compare current values and progresses per target, retrying
+failures; unknown or unreadable journals return errors, never detached.
+
+Adapters validate ownership and encode the target's original region, including
+missing, null, empty and mode information. Each file's original existence and
+mode, captured on the first target for that file, stays until every region and
+native cleanup succeeds. The adapter's idempotent `Finalize` restores file
+existence/mode while retaining unrelated content. It can fail and retry, and may
+run again after a crash. Restored region hooks must also be idempotent. Journal
+contents are private, and public status contains no snapshots or hook messages.
+
+All managed operations on one agent take the process mutex then its OS file lock;
+a failure to acquire the OS lock stops the operation. Write callbacks may add
+new targets only using their scoped `ManagedWrite` and must check each capture
+error before writing. Hooks and callbacks must not perform network requests,
+reenter a public managed method, or retain the scoped object. Integration must
+stop and drain native sync before restore and use an internal non-reentrant
+cleanup implementation; calling a lock-taking `Disconnect` inside the callback
+can deadlock. Store locks do not yet guard native public entry points.
