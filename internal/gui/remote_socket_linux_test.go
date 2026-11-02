@@ -3,11 +3,71 @@
 package gui
 
 import (
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestRemoteServerSocketInterruptedInitialization(t *testing.T) {
+	if point := os.Getenv("MAGPIE_SOCKET_TEST_EXIT"); point != "" {
+		socketCheckpoint = func(p string) error {
+			if p == point {
+				os.Exit(31)
+			}
+			return nil
+		}
+		listenProtectedUnix(os.Getenv("MAGPIE_SOCKET_TEST_PATH"))
+		os.Exit(32)
+	}
+	for _, point := range []string{"lock", "bind", "marker-write", "marker-sync", "published"} {
+		t.Run(point, func(t *testing.T) {
+			p := socketPath(t)
+			exe, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			proc, err := os.StartProcess(exe, []string{exe, "-test.run=^TestRemoteServerSocketInterruptedInitialization$"}, &os.ProcAttr{Env: append(os.Environ(), "MAGPIE_SOCKET_TEST_EXIT="+point, "MAGPIE_SOCKET_TEST_PATH="+p)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state, err := proc.Wait()
+			if err != nil || state.ExitCode() != 31 {
+				t.Fatal("child did not exit at checkpoint", err)
+			}
+			l, err := listenProtectedUnix(p)
+			if err != nil {
+				t.Fatalf("restart after %s: %v", point, err)
+			}
+			l.Close()
+		})
+	}
+}
+
+func TestRemoteServerSocketMarkerFailureCanRestart(t *testing.T) {
+	for _, point := range []string{"marker-write", "marker-sync"} {
+		t.Run(point, func(t *testing.T) {
+			p := socketPath(t)
+			socketCheckpoint = func(p string) error {
+				if p == point {
+					return errors.New("injected marker failure")
+				}
+				return nil
+			}
+			_, err := listenProtectedUnix(p)
+			socketCheckpoint = func(string) error { return nil }
+			if err == nil {
+				t.Fatal("expected marker failure")
+			}
+			l, err := listenProtectedUnix(p)
+			if err != nil {
+				t.Fatal("restart after marker failure:", err)
+			}
+			l.Close()
+		})
+	}
+}
 
 func socketPath(t *testing.T) string {
 	t.Helper()
@@ -131,6 +191,28 @@ func TestRemoteServerSocketPreservesUnknownLockFile(t *testing.T) {
 	if err != nil || string(b) != "other application data" {
 		t.Fatal("unknown lock file was modified")
 	}
+}
+
+func TestRemoteServerSocketRestartsAfterUnknownPathRemoved(t *testing.T) {
+	p := socketPath(t)
+	if err := os.Mkdir(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("unknown"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := listenProtectedUnix(p); err == nil {
+		l.Close()
+		t.Fatal("accepted unknown path")
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	l, err := listenProtectedUnix(p)
+	if err != nil {
+		t.Fatalf("restart after removing unknown path: %v", err)
+	}
+	l.Close()
 }
 
 func TestRemoteServerSocketClosePreservesReplacement(t *testing.T) {
