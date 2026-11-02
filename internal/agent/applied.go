@@ -98,6 +98,9 @@ func record(id, key, v string) {
 // which read as changed outside magpie, and the drift kept the row up
 // among the connected ones while it said Not connected (#834).
 func (a *Agent) Apply(key, v string) error {
+	if managedEntryBlocked(a) {
+		return ErrManagedOwnerRequired
+	}
 	if a.Native != nil {
 		return a.Native.Apply(key, v)
 	}
@@ -527,6 +530,9 @@ func (a *Agent) Wired() bool {
 // model picked in magpie in one click, both): the agent gets magpie's whole
 // list, and Disconnect puts back what it had before.
 func (a *Agent) Pick(key, v string) error {
+	if managedEntryBlocked(a) {
+		return ErrManagedOwnerRequired
+	}
 	if a.Native != nil {
 		value, err := a.Spell(key, v)
 		if err != nil {
@@ -617,6 +623,9 @@ func (a *Agent) rewired(err error) {
 
 // ConnectHow is Connect, saying how the model was chosen.
 func (a *Agent) ConnectHow() (c Connection, err error) {
+	if managedEntryBlocked(a) {
+		return Connection{}, ErrManagedOwnerRequired
+	}
 	defer func() { a.rewired(err) }()
 	if a.Native != nil {
 		return Connection{How: "joined"}, a.Native.Connect()
