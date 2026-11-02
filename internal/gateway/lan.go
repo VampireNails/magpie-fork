@@ -350,18 +350,18 @@ func lanGuard(next http.Handler) http.Handler {
 		}
 		remote := !local(r)
 		if !remote && rebound(r) {
-			log.Printf("refused %s %s: a web page reached loopback under the name %q", r.Method, r.URL.Path, r.Host)
+			log.Print("refused request: a web page reached loopback under an untrusted name")
 			writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer a browser that reached it as "+r.Host+" (a web site's name pointed at this computer): call it as localhost or 127.0.0.1, or send an enabled gateway key")
 			return
 		}
 		if remote && !remoteKeyed() {
 			if viaPagePort(r) {
-				log.Printf("refused %s %s on magpie web's page port: magpie isn't shared", r.Method, r.URL.Path)
+				log.Print("refused request on magpie web's page port: magpie isn't shared")
 				http.Error(w, "this request came to magpie web's page port, which answers the gateway's routes as from another machine (the port may sit behind a proxy or a forward): only while Settings → Network and sharing → Share on local network is on, with an enabled gateway key (Gateway → Gateway keys) sent as Authorization: Bearer <key> or x-api-key. An agent on this computer calls the gateway's own address ("+URL()+") instead, which needs no key", http.StatusForbidden)
 				return
 			}
 			if proxied(r) {
-				log.Printf("refused %s %s through a proxy or tunnel: magpie isn't shared", r.Method, r.URL.Path)
+				log.Print("refused request through a proxy or tunnel: magpie isn't shared")
 				http.Error(w, "this request came through a proxy or tunnel (it carries a forwarding header such as X-Forwarded-For or Cf-Connecting-IP), so magpie answers it as one from another machine: only while Settings → Network and sharing → Share on local network is on, with an enabled gateway key (Gateway → Gateway keys) sent as Authorization: Bearer <key> or x-api-key", http.StatusForbidden)
 				return
 			}
@@ -577,7 +577,7 @@ func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool
 		// on every route, from this computer too: a sandbox's agent on
 		// loopback holding a key that has run out is not let on as one
 		// with no key, which would hand it everything its key held it from
-		log.Printf("refused %s %s from %s: %s", r.Method, r.URL.Path, r.RemoteAddr, refused.Why)
+		log.Print("refused gateway request: key is disabled or expired")
 		writeError(w, provider.Chat, http.StatusUnauthorized, refused.Why)
 		return r, false
 	}
@@ -591,7 +591,7 @@ func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool
 			return r, false
 		}
 		msg := refusedKey(callerKey(r))
-		log.Printf("refused %s %s from %s: %s", r.Method, r.URL.Path, r.RemoteAddr, msg)
+		log.Print("refused gateway request: invalid or missing key")
 		writeError(w, provider.Chat, http.StatusUnauthorized, msg)
 		return r, false
 	}

@@ -3,10 +3,12 @@
 package gui
 
 import (
+	"bytes"
 	"context"
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/remotejoin"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,70 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRemoteServerLinuxDenialsAndProxyFailuresDoNotDiscloseRequest(t *testing.T) {
+	onePortHome(t)
+	onePortKey(t)
+	old := served.Swap(gateway.New())
+	t.Cleanup(func() { served.Store(old) })
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	session := webSession{cookie: "magpie_web_19443", key: "fake-admin-0123456789", keep: webCookieAge, secure: true}
+	h, err := remoteWebHandler("https://server.example:19443", session, remotejoin.NewLocalAPIResolver(http.DefaultClient, time.Second), Handler(webHost{func() {}}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := socketPath(t)
+	ln, err := listenProtectedUnix(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &http.Server{Handler: h, ConnContext: remotejoin.TrustedServeConnContext}
+	done := make(chan struct{})
+	go func() { defer close(done); s.Serve(ln) }()
+	defer func() { s.Close(); <-done }()
+	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", p)
+	}}
+	defer tr.CloseIdleConnections()
+	cli := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	check := func(target string, want int) {
+		t.Helper()
+		r, _ := http.NewRequest("GET", "http://server.example:19443"+target, nil)
+		r.Host = "fake-host-secret.example"
+		r.Header.Set("Origin", "https://fake-origin-secret.example")
+		r.Header.Set("Authorization", "Bearer fake-key-secret")
+		r.Header.Set("X-Forwarded-For", "100.75.211.11")
+		resp, err := cli.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != want {
+			t.Errorf("unexpected status: got %d want %d", resp.StatusCode, want)
+		}
+		for _, secret := range []string{"fake-path-secret", "fake-query-secret", "fake-host-secret", "fake-origin-secret", "fake-key-secret"} {
+			if strings.Contains(string(body), secret) || strings.Contains(logs.String(), secret) {
+				t.Errorf("request secret appeared in response or ordinary logs")
+			}
+		}
+	}
+	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusUnauthorized)
+	check("/api/fake-path-secret?value=fake-query-secret", http.StatusUnauthorized)
+	t.Setenv("MAGPIE_ALLOW_IPS", "192.0.2.0/24")
+	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusForbidden)
+	check("/api/fake-path-secret?value=fake-query-secret", http.StatusForbidden)
+	t.Setenv("MAGPIE_ALLOW_IPS", "")
+	served.Store(nil)
+	t.Setenv("MAGPIE_ADDR", "127.0.0.1:1")
+	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusBadGateway)
+}
 
 func TestRemoteServerLinuxSocketNativeHTTP(t *testing.T) {
 	onePortHome(t)

@@ -476,8 +476,8 @@ var toGateway = &httputil.ReverseProxy{
 	},
 	FlushInterval: -1, // streams as they come
 	ErrorHandler: func(rw http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("magpie web: %s %s: the gateway at %s: %v", r.Method, r.URL.Path, gateway.URL(), err)
-		http.Error(rw, "magpie's gateway at "+gateway.URL()+" doesn't answer: "+err.Error(), http.StatusBadGateway)
+		log.Print("magpie web: gateway proxy request failed")
+		http.Error(rw, "magpie's gateway did not answer", http.StatusBadGateway)
 	},
 }
 

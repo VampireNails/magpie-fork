@@ -208,8 +208,8 @@ func notAllowed(addr string, unknown bool) string {
 // 403, before anything else looks at it: the page `magpie web` serves.
 func AllowGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if addr, why, ok := allowed(r); !ok {
-			log.Printf("refused %s %s from %s: not on the allow list", r.Method, r.URL.Path, addr)
+		if _, why, ok := allowed(r); !ok {
+			log.Print("refused request: not on the allow list")
 			http.Error(w, why, http.StatusForbidden)
 			return
 		}
@@ -220,11 +220,11 @@ func AllowGuard(next http.Handler) http.Handler {
 // refuseNotAllowed answers a gateway request from an address the allow
 // list leaves out, in the error shape agents show; true when it did.
 func refuseNotAllowed(w http.ResponseWriter, r *http.Request) bool {
-	addr, why, ok := allowed(r)
+	_, why, ok := allowed(r)
 	if ok {
 		return false
 	}
-	log.Printf("refused %s %s from %s: not on the allow list", r.Method, r.URL.Path, addr)
+	log.Print("refused gateway request: not on the allow list")
 	writeError(w, provider.Chat, http.StatusForbidden, why)
 	return true
 }
