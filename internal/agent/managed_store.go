@@ -45,8 +45,32 @@ type managedJournal struct {
 var managedLocks sync.Map
 
 func managedFields(raw json.RawMessage, names ...string) (map[string]json.RawMessage, bool) {
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil || m == nil {
+	d := json.NewDecoder(strings.NewReader(string(raw)))
+	token, err := d.Token()
+	if err != nil || token != json.Delim('{') {
+		return nil, false
+	}
+	m := make(map[string]json.RawMessage)
+	for d.More() {
+		token, err := d.Token()
+		name, ok := token.(string)
+		if err != nil || !ok {
+			return nil, false
+		}
+		if _, exists := m[name]; exists {
+			return nil, false
+		}
+		var value json.RawMessage
+		if d.Decode(&value) != nil {
+			return nil, false
+		}
+		m[name] = value
+	}
+	if token, err = d.Token(); err != nil || token != json.Delim('}') {
+		return nil, false
+	}
+	var extra any
+	if d.Decode(&extra) != io.EOF {
 		return nil, false
 	}
 	for _, name := range names {
@@ -58,35 +82,52 @@ func managedFields(raw json.RawMessage, names ...string) (map[string]json.RawMes
 	return m, true
 }
 
+func managedAllowed(fields map[string]json.RawMessage, names ...string) bool {
+	for name, value := range fields {
+		found := false
+		for _, allowed := range names {
+			if name == allowed {
+				found = true
+				break
+			}
+		}
+		if !found || name != "value" && string(value) == "null" {
+			return false
+		}
+	}
+	return true
+}
+
 func managedShape(fields map[string]json.RawMessage) bool {
 	var entries []json.RawMessage
-	if json.Unmarshal(fields["targets"], &entries) != nil {
+	if json.Unmarshal(fields["targets"], &entries) != nil || entries == nil {
 		return false
 	}
 	for _, raw := range entries {
 		e, ok := managedFields(raw, "target", "restored")
-		if !ok {
+		if !ok || !managedAllowed(e, "target", "snapshot", "restored", "errorCode") {
 			return false
 		}
-		if _, ok := managedFields(e["target"], "path", "scope", "kind"); !ok {
+		if t, ok := managedFields(e["target"], "path", "scope", "kind"); !ok || !managedAllowed(t, "path", "scope", "kind") {
 			return false
 		}
 		if snapshot, exists := e["snapshot"]; exists {
-			if _, ok := managedFields(snapshot, "exists", "fileExists", "mode", "value"); !ok {
+			s, ok := managedFields(snapshot, "exists", "fileExists", "mode", "value")
+			if !ok || !managedAllowed(s, "exists", "fileExists", "mode", "value") || string(s["value"]) != "null" && (len(s["value"]) == 0 || s["value"][0] != '"') {
 				return false
 			}
 		}
 	}
 	var files []json.RawMessage
-	if json.Unmarshal(fields["files"], &files) != nil {
+	if json.Unmarshal(fields["files"], &files) != nil || files == nil {
 		return false
 	}
 	for _, raw := range files {
 		f, ok := managedFields(raw, "baseline", "finalized")
-		if !ok {
+		if !ok || !managedAllowed(f, "baseline", "finalized", "errorCode") {
 			return false
 		}
-		if _, ok := managedFields(f["baseline"], "path", "exists", "mode"); !ok {
+		if b, ok := managedFields(f["baseline"], "path", "exists", "mode"); !ok || !managedAllowed(b, "path", "exists", "mode") {
 			return false
 		}
 	}
@@ -188,16 +229,8 @@ func (s *ManagedStore) read(id string) (*managedJournal, error) {
 		return nil, ErrManagedUnknown
 	}
 	// A parseable truncation must not look like an empty valid journal.
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(b, &fields) != nil {
-		return nil, ErrManagedUnknown
-	}
-	for _, name := range []string{"schema", "generation", "agentId", "phase", "targets", "files", "cleanupDone"} {
-		if _, ok := fields[name]; !ok {
-			return nil, ErrManagedUnknown
-		}
-	}
-	if !managedShape(fields) {
+	fields, ok := managedFields(b, "schema", "generation", "agentId", "phase", "targets", "files", "cleanupDone")
+	if !ok || !managedAllowed(fields, "schema", "generation", "agentId", "phase", "targets", "files", "cleanupDone", "lastErrorCode") || !managedShape(fields) {
 		return nil, ErrManagedUnknown
 	}
 	j := new(managedJournal)
@@ -214,7 +247,11 @@ func (s *ManagedStore) read(id string) (*managedJournal, error) {
 		return nil, ErrManagedUnknown
 	}
 	switch j.Phase {
-	case ManagedPrepared, ManagedActive, ManagedRestoring:
+	case ManagedPrepared, ManagedActive:
+		if j.CleanupDone {
+			return nil, ErrManagedUnknown
+		}
+	case ManagedRestoring:
 	case ManagedDetached:
 		if len(j.Targets) != 0 || len(j.Files) != 0 {
 			return nil, ErrManagedUnknown
@@ -267,7 +304,14 @@ func (s *ManagedStore) read(id string) (*managedJournal, error) {
 	return j, nil
 }
 func (s *ManagedStore) save(j *managedJournal) error {
-	b, err := json.Marshal(j)
+	copy := *j
+	if copy.Targets == nil {
+		copy.Targets = []managedEntry{}
+	}
+	if copy.Files == nil {
+		copy.Files = []managedFile{}
+	}
+	b, err := json.Marshal(&copy)
 	if err != nil {
 		return ErrManagedStore
 	}

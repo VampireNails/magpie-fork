@@ -329,6 +329,17 @@ restore prepared, active, or restoring journals before permitting a new begin.
 Restoration does not compare current values and progresses per target, retrying
 failures; unknown or unreadable journals return errors, never detached.
 
+Schema 1 journals require uniquely named, correctly typed fields and actual
+`targets` and `files` arrays, including empty arrays in every phase. Duplicate,
+missing, null (except snapshot `value`), unknown or incorrectly typed members
+are unknown; no adapter hook runs and the journal remains untouched. A missing
+journal alone represents the initial detached state. A restored target omits its
+snapshot; pending targets retain a complete snapshot. Checkpoints may contain
+both. The writer always emits empty arrays for zero targets and detached state,
+while snapshot byte values preserve nil, empty and encoded-null distinctions.
+The unreleased earlier writer emitted null arrays in some empty journals; those
+bytes are ambiguous with damage and are rejected, not migrated or cleared.
+
 Adapters validate ownership and encode the target's original region, including
 missing, null, empty and mode information. Each file's original existence and
 mode, captured on the first target for that file, stays until every region and
