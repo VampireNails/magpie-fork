@@ -81,6 +81,77 @@ func TestRemoteServerLinuxDenialsAndProxyFailuresDoNotDiscloseRequest(t *testing
 	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusBadGateway)
 }
 
+func TestRemoteServerLinuxAuthenticatedCORSDoesNotDiscloseRequest(t *testing.T) {
+	onePortHome(t)
+	key := onePortKey(t)
+	old := served.Swap(gateway.New())
+	t.Cleanup(func() { served.Store(old) })
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	session := webSession{cookie: "magpie_web_19443", key: "fake-admin-0123456789", keep: webCookieAge, secure: true}
+	h, err := remoteWebHandler("https://server.example:19443", session, remotejoin.NewLocalAPIResolver(http.DefaultClient, time.Second), Handler(webHost{func() {}}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := socketPath(t)
+	ln, err := listenProtectedUnix(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &http.Server{Handler: h, ConnContext: remotejoin.TrustedServeConnContext}
+	done := make(chan struct{})
+	go func() { defer close(done); s.Serve(ln) }()
+	defer func() { s.Close(); <-done }()
+	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", p)
+	}}
+	defer tr.CloseIdleConnections()
+	cli := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	check := func(target string, want int) {
+		t.Helper()
+		r, _ := http.NewRequest("GET", "http://server.example:19443"+target, nil)
+		r.Host = "fake-host-secret.example"
+		r.Header.Set("Origin", "https://fake-origin-secret.example")
+		r.Header.Set("Authorization", "Bearer "+key)
+		r.Header.Set("X-Forwarded-For", "100.75.211.11")
+		resp, err := cli.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != want {
+			t.Errorf("unexpected status: got %d want %d", resp.StatusCode, want)
+		}
+		for _, secret := range []string{"fake-path-secret", "fake-query-secret", "fake-host-secret", "fake-origin-secret", "fake-key-secret"} {
+			if strings.Contains(string(body), secret) || strings.Contains(logs.String(), secret) {
+				t.Errorf("request secret appeared in response or ordinary logs")
+			}
+		}
+	}
+	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusForbidden)
+	for _, origin := range []string{"null", "http://server.example:19443"} {
+		r, _ := http.NewRequest("GET", "http://server.example:19443/v1/models", nil)
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Authorization", "Bearer "+key)
+		r.Header.Set("X-Forwarded-For", "100.75.211.11")
+		resp, err := cli.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("allowed origin %q returned %d", origin, resp.StatusCode)
+		}
+	}
+}
+
 func TestRemoteServerLinuxSocketNativeHTTP(t *testing.T) {
 	onePortHome(t)
 	gatewayKey := onePortKey(t)

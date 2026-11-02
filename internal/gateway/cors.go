@@ -46,18 +46,18 @@ func corsGuard(next http.Handler) http.Handler {
 		origin := r.Header.Get("Origin")
 		if origin == "" || !corsAllowed(origin) {
 			if foreignPage(r, origin) {
-				log.Printf("refused %s %s from the web page %s: not one listed in Settings", r.Method, r.URL.Path, origin)
-				writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer the web page "+origin+": list it in Settings → Network and sharing → Web pages to let it call magpie with a gateway key")
+				log.Print("refused gateway request: web page is not listed in Settings")
+				writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer this web page: list it in Settings → Network and sharing → Web pages to let it call magpie with a gateway key")
 				return
 			}
 			if origin == "null" && !keyedCaller(r) {
-				log.Printf("refused %s %s from Origin: null: a sandboxed frame or a local page, with no gateway key", r.Method, r.URL.Path)
+				log.Print("refused gateway request: sandboxed frame or local page without a gateway key")
 				writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer a sandboxed frame or a local page (Origin: null) without a gateway key: create one in magpie's Gateway page and send it as Authorization: Bearer <key> (or x-api-key)")
 				return
 			}
 			if localhostSubdomain(origin) && !keyedCaller(r) {
-				log.Printf("refused %s %s from the web page %s: a localhost subdomain, with no gateway key", r.Method, r.URL.Path, origin)
-				writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer the web page "+origin+" without a gateway key: Safari and other WebKit browsers ask the network's DNS for a localhost subdomain, so the page may not be on this computer. Open it at localhost or 127.0.0.1, or create a key in magpie's Gateway page and send it as Authorization: Bearer <key> (or x-api-key)")
+				log.Print("refused gateway request: localhost subdomain without a gateway key")
+				writeError(w, provider.Chat, http.StatusForbidden, "magpie doesn't answer this web page without a gateway key: Safari and other WebKit browsers ask the network's DNS for a localhost subdomain, so the page may not be on this computer. Open it at localhost or 127.0.0.1, or create a key in magpie's Gateway page and send it as Authorization: Bearer <key> (or x-api-key)")
 				return
 			}
 			next.ServeHTTP(w, r)
