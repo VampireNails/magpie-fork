@@ -384,11 +384,27 @@ func lanGuard(next http.Handler) http.Handler {
 		// a CI job's OIDC token traded for a key carries the token, not a
 		// key: the handler verifies it, and counts one it refuses against
 		// tooManyAuthFails (oidc_keys.go)
-		if remote && oidcExchange(r) {
-			next.ServeHTTP(w, r)
-			return
+		if remote {
+			exchange, err := oidcExchange(r)
+			if err != nil {
+				keyStoreUnavailable(w)
+				return
+			}
+			if exchange {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
-		if remote || managedKey(r) {
+		named := false
+		if !remote {
+			var err error
+			named, err = managedKey(r)
+			if err != nil {
+				keyStoreUnavailable(w)
+				return
+			}
+		}
+		if remote || named {
 			var ok bool
 			r, ok = identifyCaller(w, r)
 			if !ok {
@@ -519,11 +535,18 @@ func ownHost(host string) bool {
 // callerGuard also covers embedded handlers used by the web app and tests.
 func callerGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if access.Caller(r.Context()).KeyID == "" && managedKey(r) && (local(r) || remoteKeyed()) {
-			var ok bool
-			r, ok = identifyCaller(w, r)
-			if !ok {
+		if access.Caller(r.Context()).KeyID == "" && (local(r) || remoteKeyed()) {
+			named, err := managedKey(r)
+			if err != nil {
+				keyStoreUnavailable(w)
 				return
+			}
+			if named {
+				var ok bool
+				r, ok = identifyCaller(w, r)
+				if !ok {
+					return
+				}
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -542,6 +565,11 @@ func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool
 		}
 		if refused == nil {
 			errors.As(err, &refused)
+		}
+		var knownRefusal *access.Refused
+		if !errors.Is(err, access.ErrUnknown) && !errors.As(err, &knownRefusal) {
+			keyStoreUnavailable(w)
+			return r, false
 		}
 	}
 	if !ok && refused != nil {
@@ -668,8 +696,21 @@ func callerKeys(r *http.Request) []string {
 
 // managedKey: the request carries a named gateway key's form (sk-magpie-…),
 // or a key's own value a user gave it, in any of the places a key is read.
-func managedKey(r *http.Request) bool {
-	return slices.ContainsFunc(callerKeys(r), access.Named)
+func managedKey(r *http.Request) (bool, error) {
+	for _, key := range callerKeys(r) {
+		named, err := access.Named(key)
+		if err != nil || named {
+			return named, err
+		}
+	}
+	return false, nil
+}
+
+// Neither the credential nor a storage error (which may quote file data)
+// belongs in the response or ordinary logs. The next request retries.
+func keyStoreUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "1")
+	writeError(w, provider.Chat, http.StatusServiceUnavailable, "gateway key store is unavailable; retry the request")
 }
 
 // refusedKey says why a caller's key was turned away: none came, or the

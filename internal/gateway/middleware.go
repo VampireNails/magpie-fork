@@ -200,9 +200,10 @@ func gatewayQuery(req *Request) string {
 // serve the owner's own agents without serving a friend's key
 // (plugins#526). Plugins that trust only "local" see both as not local.
 func gatewayOrigin(r *http.Request) string {
+	named, err := managedKey(r)
 	if who := access.Caller(r.Context()); who.KeyID != "" && who.Default && ownComputer(r) {
 		return "magpie-key"
-	} else if who.KeyID != "" || managedKey(r) {
+	} else if who.KeyID != "" || named || err != nil {
 		return "gateway-key"
 	}
 	if local(r) && !forwarded(r) {

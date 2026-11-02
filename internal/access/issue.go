@@ -41,8 +41,10 @@ type Refused struct{ Why string }
 
 func (r *Refused) Error() string { return r.Why }
 
-// errUnknown: the secret is no enabled key, or the store can't be read.
-var errUnknown = errors.New("not an enabled gateway key")
+// ErrUnknown means the readable store has no enabled key with this secret.
+// Storage failures are distinct: a caller must not become anonymous when
+// its identity cannot be determined.
+var ErrUnknown = errors.New("not an enabled gateway key")
 
 // expired: k has an expiry and it has come.
 func (k Key) expired(now time.Time) bool { return !k.Expires.IsZero() && !now.Before(k.Expires) }
@@ -238,8 +240,11 @@ func Check(secret string) (Identity, error) {
 	}
 	defer mu.Unlock()
 	keys, err := load()
-	if err != nil || secret == "" {
-		return Identity{}, errUnknown
+	if err != nil {
+		return Identity{}, err
+	}
+	if secret == "" {
+		return Identity{}, ErrUnknown
 	}
 	i := slices.IndexFunc(keys, func(k Key) bool { return subtle.ConstantTimeCompare([]byte(secret), []byte(k.Secret)) == 1 })
 	if i < 0 {
@@ -250,11 +255,11 @@ func Check(secret string) (Identity, error) {
 			k := legacyLANKey(s.LANKey)
 			return Identity{KeyID: k.ID, KeyName: k.Name, Default: true}, nil
 		}
-		return Identity{}, errUnknown
+		return Identity{}, ErrUnknown
 	}
 	k := keys[i]
 	if k.Off {
-		return Identity{}, errUnknown
+		return Identity{}, ErrUnknown
 	}
 	now := Now()
 	if k.expired(now) {

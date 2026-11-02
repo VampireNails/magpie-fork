@@ -28,8 +28,12 @@ import (
 const OIDCKeysPath = KeysPath + "/oidc"
 
 // oidcExchange: r is a token's trade, which carries a token, not a key.
-func oidcExchange(r *http.Request) bool {
-	return r.Method == http.MethodPost && r.URL.Path == OIDCKeysPath && r.URL.RawPath == "" && !managedKey(r)
+func oidcExchange(r *http.Request) (bool, error) {
+	if r.Method != http.MethodPost || r.URL.Path != OIDCKeysPath || r.URL.RawPath != "" {
+		return false, nil
+	}
+	named, err := managedKey(r)
+	return !named && err == nil, err
 }
 
 func (s *Server) oidcIssueKey(w http.ResponseWriter, r *http.Request) {

@@ -309,7 +309,15 @@ func TestLANRotationKeepsOlderMagpieWorking(t *testing.T) {
 func TestOwnKeyValue(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	const own = "cpa-family-key-0042"
-	if Named(own) {
+	named := func(secret string) bool {
+		t.Helper()
+		ok, err := Named(secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if named(own) {
 		t.Fatal("named before it is a key")
 	}
 	got, err := Update("add-key", Change{Name: "Family", Secret: "  " + own + "\n"})
@@ -323,7 +331,7 @@ func TestOwnKeyValue(t *testing.T) {
 	if who, ok := Authenticate(own); !ok || who.KeyName != "Family" {
 		t.Fatal(who, ok)
 	}
-	if !Named(own) || Named(own+"x") || Named("") || !Named(Prefix+"abc") {
+	if !named(own) || named(own+"x") || named("") || !named(Prefix+"abc") {
 		t.Fatal("Named")
 	}
 	for _, bad := range []string{"short", own, "has a space in it", "tab\there-and-more", "非ascii-key-value", "sk-magpie-key-mine-1234", strings.Repeat("k", 257)} {
@@ -339,7 +347,7 @@ func TestOwnKeyValue(t *testing.T) {
 	if err != nil || !strings.HasPrefix(rotated, Prefix) {
 		t.Fatal(rotated, err)
 	}
-	if _, ok := Authenticate(own); ok || Named(own) {
+	if _, ok := Authenticate(own); ok || named(own) {
 		t.Fatal("the old value still works")
 	}
 	short, err := Update("add-key", Change{Name: "Short", Secret: "abcd1234"})

@@ -70,7 +70,7 @@ func TestIssuedKeyExpires(t *testing.T) {
 	if n, err := Prune(); n != 1 || err != nil {
 		t.Fatal(n, err)
 	}
-	if _, err := Check(k.Key); !errors.Is(err, errUnknown) {
+	if _, err := Check(k.Key); !errors.Is(err, ErrUnknown) {
 		t.Fatal(err)
 	}
 }

@@ -35,45 +35,53 @@ func Managed(secret string) bool {
 // Named: secret has a named gateway key's form (sk-magpie-…), or is the
 // key's own value a user gave it (Change.Secret), so a request from this
 // computer with one is counted and limited as that key, as a sk-magpie-
-// key is.
-func Named(secret string) bool {
+// key is. An error means the store is unknown, never an anonymous caller.
+func Named(secret string) (bool, error) {
 	if Managed(secret) {
-		return true
+		return true, nil
 	}
 	if secret == "" {
-		return false
+		return false, nil
 	}
-	own := ownSecrets()
+	own, err := ownSecrets()
+	if err != nil {
+		return false, err
+	}
 	_, ok := own[secret]
-	return ok
+	return ok, nil
 }
 
 // own caches the key store's own-value secrets by the file's size and
 // time, so a request from this computer doesn't read it each time.
 var own struct {
 	sync.Mutex
+	path    string
 	size    int64
 	mod     int64
 	secrets map[string]struct{}
 }
 
-func ownSecrets() map[string]struct{} {
-	fi, err := os.Stat(Path())
+func ownSecrets() (map[string]struct{}, error) {
+	path := Path()
+	fi, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	own.Lock()
 	defer own.Unlock()
-	if own.secrets != nil && own.size == fi.Size() && own.mod == fi.ModTime().UnixNano() {
-		return own.secrets
+	if own.secrets != nil && own.path == path && own.size == fi.Size() && own.mod == fi.ModTime().UnixNano() {
+		return own.secrets, nil
 	}
 	if err := lockStore(context.Background()); err != nil {
-		return nil
+		return nil, err
 	}
 	keys, err := load()
 	mu.Unlock()
 	if err != nil {
-		return nil // unknown: tried again on the next request
+		return nil, err // unknown: tried again on the next request
 	}
 	m := map[string]struct{}{}
 	for _, k := range keys {
@@ -81,8 +89,8 @@ func ownSecrets() map[string]struct{} {
 			m[k.Secret] = struct{}{}
 		}
 	}
-	own.size, own.mod, own.secrets = fi.Size(), fi.ModTime().UnixNano(), m
-	return m
+	own.path, own.size, own.mod, own.secrets = path, fi.Size(), fi.ModTime().UnixNano(), m
+	return m, nil
 }
 
 // ownSecret checks a key value a user brings (one their clients already
