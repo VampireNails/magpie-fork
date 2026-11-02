@@ -12,6 +12,7 @@ package netproxy
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/yetone/magpie/internal/probelog"
 	"github.com/yetone/magpie/internal/settings"
+	"github.com/yetone/magpie/internal/tailnetdns"
 )
 
 // Install routes http.DefaultTransport (and so http.DefaultClient) through
@@ -70,6 +72,9 @@ func Func(req *http.Request) (*url.URL, error) {
 	}
 	if c := choiceOf(req.Context()); c != "" {
 		return forChoice(c)
+	}
+	if tailnetdns.IsTarget(req.URL.Host) {
+		return nil, nil
 	}
 	p, err := For(req.URL)
 	if p != nil && onLAN(req.URL.Hostname()) {
@@ -163,6 +168,11 @@ var HTTP1 func(u *url.URL) bool
 // host alone (uncheckTLS). A host whose IPv6 is taken but goes nowhere
 // is dialed over IPv4 (v4Fallback).
 func Dispatch(base *http.Transport) http.RoundTripper {
+	dial := base.DialContext
+	if dial == nil {
+		dial = (&net.Dialer{}).DialContext
+	}
+	base.DialContext = tailnetdns.Wrap(dial)
 	v4Fallback(base)
 	return &dispatch{base: base, own: map[route]*http.Transport{}, moved: Watch()}
 }
@@ -191,10 +201,18 @@ func (d *dispatch) RoundTrip(req *http.Request) (*http.Response, error) {
 		d.CloseIdleConnections()
 	}
 	r := route{choice: choiceOf(req.Context()), h1: HTTP1 != nil && HTTP1(req.URL), unchecked: uncheckedHost(req)}
+	var res *http.Response
+	var err error
 	if r == (route{}) {
-		return v4Retry(d.base, req)
+		res, err = v4Retry(d.base, req)
+	} else {
+		res, err = v4Retry(d.transport(r), req)
 	}
-	return v4Retry(d.transport(r), req)
+	if err == nil && res.StatusCode >= 300 && res.StatusCode < 400 && res.Header.Get("Location") != "" && tailnetdns.IsTarget(req.URL.Host) {
+		res.Body.Close()
+		return nil, errors.New("remote server redirect refused")
+	}
+	return res, err
 }
 
 // Watch is a check a transport of its own makes before each request: it
