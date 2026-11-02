@@ -71,9 +71,9 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 				return err
 			}
 			if edit.GetYAMLMap(p, "providers."+magpieID) != nil {
-				errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { return value }))
+				errs = append(errs, hermesScopedSyncYAML(before, p, "providers."+magpieID, func() any { return value }))
 			} else {
-				errs = append(errs, edit.SetYAML(p, edit.KV{Path: "providers." + magpieID, Value: value}))
+				errs = append(errs, hermesScopedSetYAML(before, p, edit.KV{Path: "providers." + magpieID, Value: value}))
 			}
 		}
 		return errors.Join(errs...)
@@ -100,14 +100,14 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 			}
 		}
 		if len(del) > 0 {
-			if err := edit.DelYAML(path, del...); err != nil {
+			if err := hermesScopedDelYAML(before, path, del...); err != nil {
 				return err
 			}
 		}
 		if len(kvs) == 0 {
 			return nil
 		}
-		return edit.SetYAML(path, kvs...)
+		return hermesScopedSetYAML(before, path, kvs...)
 	}
 	a := &Agent{
 		ID: "hermes", Name: "Hermes Agent", Icon: "hermes", Aliases: []string{"hermes-agent"}, Spelled: prefixed, NoNames: true,
@@ -120,7 +120,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 				}
 			}
 			if before == nil {
-				if err := syncYAML(path, "providers."+magpieID, func() any { value, _ := hermesProvider(path); return value }); err != nil {
+				if err := hermesScopedSyncYAML(before, path, "providers."+magpieID, func() any { value, _ := hermesProvider(path); return value }); err != nil {
 					return err
 				}
 				if joined() {
@@ -129,7 +129,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 				var errs []error
 				for _, p := range hermesOthers(at, dir) {
 					if edit.GetYAMLMap(p, "providers."+magpieID) != nil {
-						errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { value, _ := hermesProvider(p); return value }))
+						errs = append(errs, hermesScopedSyncYAML(before, p, "providers."+magpieID, func() any { value, _ := hermesProvider(p); return value }))
 					}
 				}
 				return errors.Join(errs...)
@@ -145,7 +145,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 					}
 				}
 			}
-			if err := syncYAML(path, "providers."+magpieID, func() any { return value }); err != nil {
+			if err := hermesScopedSyncYAML(before, path, "providers."+magpieID, func() any { return value }); err != nil {
 				return err
 			}
 			if joined() {
@@ -165,7 +165,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 					if err != nil {
 						return err
 					}
-					errs = append(errs, syncYAML(p, "providers."+magpieID, func() any { return value }))
+					errs = append(errs, hermesScopedSyncYAML(before, p, "providers."+magpieID, func() any { return value }))
 				}
 			}
 			return errors.Join(errs...)
@@ -194,7 +194,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 				own = hermesModel{Provider: getKey("model.provider"), Default: getKey("model.default")}
 			}
 			if joined() {
-				errs = append(errs, edit.DelYAML(path, "providers."+magpieID))
+				errs = append(errs, hermesScopedDelYAML(before, path, "providers."+magpieID))
 			}
 			for _, p := range hermesOthers(at, dir) {
 				errs = append(errs, hermesUnwireProfile(path, p, own))
@@ -245,7 +245,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 					if onMagpie() {
 						return restore()
 					}
-					return edit.DelYAML(path, "model.default")
+					return hermesScopedDelYAML(before, path, "model.default")
 				}
 				if ref, ok := strings.CutPrefix(v, magpieID+"/"); ok && isMagpie(ref) {
 					// the model magpie had set: recorded, or, before the
@@ -268,7 +268,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 					if err != nil {
 						return err
 					}
-					if err := edit.SetYAML(path,
+					if err := hermesScopedSetYAML(before, path,
 						edit.KV{Path: "providers." + magpieID, Value: value},
 						edit.KV{Path: "model.provider", Value: magpieID},
 						edit.KV{Path: "model.default", Value: ref},
@@ -292,7 +292,7 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 						return err
 					}
 				}
-				return edit.SetYAML(path, edit.KV{Path: "model.default", Value: v})
+				return hermesScopedSetYAML(before, path, edit.KV{Path: "model.default", Value: v})
 			},
 			Options: func(cur map[string]string) []Option {
 				return withVia(ownOptions("", cur["model"]), "hermes", magpieID+"/")
@@ -309,9 +309,9 @@ func hermesInScoped(at place, before func(string) error, beforeEnv func(string, 
 					}
 				}
 				if v == "" {
-					return edit.DelYAML(path, "agent.reasoning_effort")
+					return hermesScopedDelYAML(before, path, "agent.reasoning_effort")
 				}
-				return edit.SetYAML(path, edit.KV{Path: "agent.reasoning_effort", Value: v})
+				return hermesScopedSetYAML(before, path, edit.KV{Path: "agent.reasoning_effort", Value: v})
 			},
 			Options: func(map[string]string) []Option {
 				return static("none", "minimal", "low", "medium", "high", "xhigh")
@@ -369,7 +369,7 @@ func hermesProfileFields(at place, dir string, provider func(string) (any, error
 					if err != nil {
 						return err
 					}
-					if err := edit.SetYAML(p,
+					if err := hermesScopedSetYAML(before, p,
 						edit.KV{Path: "providers." + magpieID, Value: value},
 						edit.KV{Path: "model.provider", Value: magpieID},
 						edit.KV{Path: "model.default", Value: ref},
@@ -392,12 +392,12 @@ func hermesProfileFields(at place, dir string, provider func(string) (any, error
 						}
 					}
 					if len(del) > 0 {
-						if err := edit.DelYAML(p, del...); err != nil {
+						if err := hermesScopedDelYAML(before, p, del...); err != nil {
 							return err
 						}
 					}
 					if len(kvs) > 0 {
-						if err := edit.SetYAML(p, kvs...); err != nil {
+						if err := hermesScopedSetYAML(before, p, kvs...); err != nil {
 							return err
 						}
 					}
@@ -407,7 +407,7 @@ func hermesProfileFields(at place, dir string, provider func(string) (any, error
 				if v == "" {
 					return nil
 				}
-				return edit.SetYAML(p, edit.KV{Path: "model.default", Value: v})
+				return hermesScopedSetYAML(before, p, edit.KV{Path: "model.default", Value: v})
 			},
 			Options: func(cur map[string]string) []Option {
 				return withVia(ownOptions("", cur[hermesProfileKey+name]), "hermes", magpieID+"/")
@@ -563,7 +563,7 @@ func hermesFollowScoped(at place, dir, was, now, ref string, before func(string)
 					return err
 				}
 			}
-			errs = append(errs, edit.SetYAML(p, edit.KV{Path: k, Value: ref}))
+			errs = append(errs, hermesScopedSetYAML(before, p, edit.KV{Path: k, Value: ref}))
 		}
 	}
 	return errors.Join(errs...)
@@ -686,13 +686,13 @@ func hermesBackScoped(at place, dir, ref string, before func(string) error) erro
 				continue
 			}
 			if off.Magpie.Key == "model.model" {
-				errs = append(errs, edit.DelYAML(p, "model.default"))
+				errs = append(errs, hermesScopedDelYAML(before, p, "model.default"))
 			}
-			errs = append(errs, edit.SetYAML(p, edit.KV{Path: "model.provider", Value: magpieID}, edit.KV{Path: off.Magpie.Key, Value: off.Magpie.Default}))
+			errs = append(errs, hermesScopedSetYAML(before, p, edit.KV{Path: "model.provider", Value: magpieID}, edit.KV{Path: off.Magpie.Key, Value: off.Magpie.Default}))
 			continue
 		}
 		if v, ok := edit.GetYAML(p, "model"); cur.Provider == "" && cur.Default == "" && (!ok || v == "") {
-			errs = append(errs, edit.SetYAML(p, edit.KV{Path: "model.provider", Value: magpieID}, edit.KV{Path: "model.default", Value: ref}))
+			errs = append(errs, hermesScopedSetYAML(before, p, edit.KV{Path: "model.provider", Value: magpieID}, edit.KV{Path: "model.default", Value: ref}))
 		}
 	}
 	return errors.Join(errs...)
@@ -820,6 +820,22 @@ func hermesKeptKeyScoped(at place, path, want string, before func(string, string
 		if err := before(hermesEnvFile(path), name); err != nil {
 			return "", err
 		}
+	}
+	if before != nil {
+		err := hermesManagedEdit(hermesEnvFile(path), func(p string) error {
+			if f, e := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600); e == nil {
+				if e = f.Close(); e != nil {
+					return e
+				}
+			} else if !errors.Is(e, os.ErrExist) {
+				return e
+			}
+			return hermesManagedSetEnv(p, name, want)
+		})
+		if err != nil {
+			return "", err
+		}
+		return raw, nil
 	}
 	// a .env made here holds a key, so only its owner reads it, as
 	// Hermes writes its own (_write_env_lines)

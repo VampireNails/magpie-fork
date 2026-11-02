@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/yetone/magpie/internal/edit"
@@ -173,5 +174,175 @@ func TestManagedHermesEnvCaptureFailureStopsNativeWrite(t *testing.T) {
 				t.Fatal("env created after capture failure")
 			}
 		})
+	}
+}
+
+// The target assignment's comment belongs to the user, even when its value is managed.
+func TestManagedHermesEnvRestoresAssignmentComment(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".env")
+	original := "MY_KEY=original # keep-this-note\nOTHER=before\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := HermesManagedAdapter(root)
+	target := hermesManagedTarget(path, "MY_KEY")
+	snap, err := adapter.Capture(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetEnvFile(path, edit.KV{Path: "MY_KEY", Value: "fixture-gateway"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetEnvFile(path, edit.KV{Path: "OTHER", Value: "later"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.Restore(target, snap); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "MY_KEY=original # keep-this-note") {
+		t.Error("original assignment comment lost")
+	}
+	if got, _ := edit.GetEnvFile(path, "OTHER"); got != "later" {
+		t.Error("unrelated value changed")
+	}
+}
+
+func TestManagedHermesRestoreHardlinkLeavesOtherPath(t *testing.T) {
+	for _, tc := range []struct{ name, scope, initial string }{{".env", "MY_KEY", "MY_KEY=original\n"}, {"config.yaml", "model", "model: original\n"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, tc.name)
+			other := filepath.Join(root, "other")
+			if err := os.WriteFile(path, []byte(tc.initial), 0600); err != nil {
+				t.Fatal(err)
+			}
+			adapter := HermesManagedAdapter(root)
+			target := hermesManagedTarget(path, tc.scope)
+			snap, err := adapter.Capture(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			later := "MY_KEY=later\n"
+			if tc.name == "config.yaml" {
+				later = "model: later\n"
+			}
+			if err := os.WriteFile(other, []byte(later), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(other, path); err != nil {
+				t.Fatal(err)
+			}
+			if err := adapter.Restore(target, snap); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(other)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != later {
+				t.Error("restore changed another hardlink")
+			}
+		})
+	}
+}
+
+func TestManagedHermesApplyHardlinksLeaveOtherPaths(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, "hermes")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HERMES_HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "config.yaml")
+	env := filepath.Join(root, ".env")
+	cfg := "model:\n  default: own\n  provider: own\nproviders:\n  magpie:\n    api_key: ${MY_KEY}\n"
+	if err := os.WriteFile(config, []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(env, []byte("MY_KEY=fixture-original # keep\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{config, env} {
+		if err := os.Link(p, p+".other"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := provider.Save(provider.Provider{ID: "deepseek", Name: "DeepSeek", Chat: "https://example.invalid/v1", Key: "fixture", Models: []string{"pro"}}); err != nil {
+		t.Fatal(err)
+	}
+	a := HermesManagedAdapter(root)
+	store, err := NewManagedStore(filepath.Join(home, "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.BeginManaged("hermes", a, hermesManagedTarget(config, "model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = session.BeforeManagedWrite(func(w *ManagedWrite) error {
+		return WithManagedHermes(w, home, func(a *Agent) error { return a.Apply("model", "magpie/deepseek/pro") })
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{config, env} {
+		b, err := os.ReadFile(p + ".other")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := cfg
+		if p == env {
+			expected = "MY_KEY=fixture-original # keep\n"
+		}
+		if string(b) != expected {
+			t.Error("managed apply changed another hardlink")
+		}
+	}
+}
+
+func TestManagedHermesEnvAssignmentVariants(t *testing.T) {
+	for _, original := range []string{"MY_KEY=original # note\n", "MY_KEY=\"a#b\" # note\n", "MY_KEY= # note\n", "MY_KEY=one # first\nMY_KEY=two # last\n", "MY_KEY=\"first\nsecond # inside\" # note\n"} {
+		root := t.TempDir()
+		path := filepath.Join(root, ".env")
+		if err := os.WriteFile(path, []byte(original+"OTHER=initial\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		a := HermesManagedAdapter(root)
+		target := hermesManagedTarget(path, "MY_KEY")
+		snap, err := a.Capture(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hermesManagedSetEnv(path, "MY_KEY", "fixture"); err != nil {
+			t.Fatal(err)
+		}
+		if err := edit.SetEnvFile(path, edit.KV{Path: "OTHER", Value: "later"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.Restore(target, snap); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), original) {
+			t.Error("original assignment lost")
+		}
+		if v, _ := edit.GetEnvFile(path, "OTHER"); v != "later" {
+			t.Error("other variable changed")
+		}
 	}
 }

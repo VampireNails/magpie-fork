@@ -11,11 +11,15 @@ import (
 	"strings"
 
 	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/steady"
 	"gopkg.in/yaml.v3"
 )
 
 const managedHermesYAML = "hermes-yaml-v1"
 const managedHermesEnv = "hermes-env-v1"
+
+var managedHermesEnvLine = regexp.MustCompile(`^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=`)
 
 var managedHermesVar = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
@@ -147,10 +151,23 @@ func hermesManagedCapture(t ManagedTarget) (ManagedSnapshot, error) {
 		return s, err
 	}
 	if t.Kind == managedHermesEnv {
-		value, ok := edit.GetEnvFile(t.Path, t.Scope)
-		s.Exists = ok
-		if ok {
-			s.Value = []byte(value)
+		records, err := hermesEnvRecords(raw)
+		if err != nil {
+			return s, err
+		}
+		var lines []string
+		for _, record := range records {
+			if record.key == t.Scope {
+				lines = append(lines, record.text)
+			}
+		}
+		s.Exists = len(lines) > 0
+		if s.Exists {
+			encoded, e := json.Marshal(lines)
+			if e != nil {
+				return s, e
+			}
+			s.Value = append([]byte("hermes-env-lines-v1:"), encoded...)
 		}
 		return s, nil
 	}
@@ -183,6 +200,10 @@ func hermesManagedCapture(t ManagedTarget) (ManagedSnapshot, error) {
 }
 
 func hermesManagedRestore(t ManagedTarget, s ManagedSnapshot) error {
+	return hermesManagedEdit(t.Path, func(path string) error { t.Path = path; return hermesManagedRestoreStaged(t, s) })
+}
+
+func hermesManagedRestoreStaged(t ManagedTarget, s ManagedSnapshot) error {
 	if t.Kind != managedHermesYAML {
 		return hermesManagedRestoreRegion(t, s)
 	}
@@ -235,10 +256,54 @@ func hermesManagedRestore(t ManagedTarget, s ManagedSnapshot) error {
 
 func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 	if t.Kind == managedHermesEnv {
-		if s.Exists {
+		const prefix = "hermes-env-lines-v1:"
+		if s.Exists && !bytes.HasPrefix(s.Value, []byte(prefix)) {
 			return edit.SetEnvFile(t.Path, edit.KV{Path: t.Scope, Value: string(s.Value)})
 		}
-		return edit.DelEnvFile(t.Path, t.Scope)
+		var original []string
+		if s.Exists && json.Unmarshal(s.Value[len(prefix):], &original) != nil {
+			return ErrManagedRestore
+		}
+		raw, exists, _, err := hermesManagedRead(t.Path)
+		if err != nil {
+			return err
+		}
+		if !exists && !s.Exists {
+			return nil
+		}
+		records, err := hermesEnvRecords(raw)
+		if err != nil {
+			return err
+		}
+		var out strings.Builder
+		inserted := false
+		appendOriginal := func() {
+			for i, saved := range original {
+				out.WriteString(saved)
+				if !strings.HasSuffix(saved, "\n") && (i+1 < len(original) || len(records) > 1) {
+					out.WriteByte('\n')
+				}
+			}
+		}
+		for _, record := range records {
+			if record.key == t.Scope {
+				if !inserted {
+					appendOriginal()
+					inserted = true
+				}
+				continue
+			}
+			out.WriteString(record.text)
+		}
+		if !inserted && len(original) > 0 {
+			if out.Len() > 0 && !strings.HasSuffix(out.String(), "\n") {
+				out.WriteByte('\n')
+			}
+			for _, saved := range original {
+				out.WriteString(saved)
+			}
+		}
+		return edit.WriteAtomic(t.Path, []byte(out.String()))
 	}
 	var r hermesRegion
 	if s.FileExists && json.Unmarshal(s.Value, &r) != nil {
@@ -316,7 +381,7 @@ func hermesManagedFinalize(f ManagedFileBaseline) error {
 		}
 	}
 	if f.Exists {
-		return os.Chmod(f.Path, os.FileMode(f.Mode))
+		return hermesManagedEdit(f.Path, func(p string) error { return os.Chmod(p, os.FileMode(f.Mode)) })
 	}
 	return nil
 }
@@ -480,4 +545,152 @@ func hermesManagedCleanup(root string) error {
 		return err
 	}
 	return edit.WriteAtomic(appliedPath(), raw)
+}
+
+// hermesManagedEdit runs the editor on a private copy and replaces only the
+// requested path, including when that path names a multiply linked file.
+func hermesManagedEdit(path string, fn func(string) error) error {
+	if _, err := managedPath(path); err != nil {
+		return err
+	}
+	raw, exists, mode, err := hermesManagedRead(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp(filepath.Dir(path), ".magpie-hermes-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	stage := filepath.Join(dir, filepath.Base(path))
+	if exists {
+		if err := os.WriteFile(stage, raw, os.FileMode(mode)); err != nil {
+			return err
+		}
+	}
+	if err := fn(stage); err != nil {
+		return err
+	}
+	if _, err := managedPath(path); err != nil {
+		return err
+	}
+	_, err = os.Stat(stage)
+	if errors.Is(err, os.ErrNotExist) {
+		err = os.Remove(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	defer filememo.Forget()
+	return steady.Rename(stage, path)
+}
+func hermesScopedSetYAML(before func(string) error, path string, kvs ...edit.KV) error {
+	if before == nil {
+		return edit.SetYAML(path, kvs...)
+	}
+	if err := before(path); err != nil {
+		return err
+	}
+	return hermesManagedEdit(path, func(p string) error { return edit.SetYAML(p, kvs...) })
+}
+func hermesScopedDelYAML(before func(string) error, path string, keys ...string) error {
+	if before == nil {
+		return edit.DelYAML(path, keys...)
+	}
+	if err := before(path); err != nil {
+		return err
+	}
+	return hermesManagedEdit(path, func(p string) error { return edit.DelYAML(p, keys...) })
+}
+func hermesScopedSyncYAML(before func(string) error, path, key string, value func() any) error {
+	if before == nil {
+		return syncYAML(path, key, value)
+	}
+	if _, exists := edit.GetYAMLText(path, key); !exists {
+		return nil
+	}
+	if err := before(path); err != nil {
+		return err
+	}
+	return hermesManagedEdit(path, func(p string) error { return syncYAML(p, key, value) })
+}
+
+type hermesEnvRecord struct{ key, text string }
+
+// hermesEnvRecords keeps quoted multiline values intact without interpreting #
+// inside quotes. Invalid quoted records are rejected to keep recovery retryable.
+func hermesEnvRecords(raw []byte) ([]hermesEnvRecord, error) {
+	lines := strings.SplitAfter(string(raw), "\n")
+	var records []hermesEnvRecord
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		match := managedHermesEnvLine.FindStringSubmatchIndex(line)
+		if match == nil {
+			records = append(records, hermesEnvRecord{text: line})
+			continue
+		}
+		key := line[match[2]:match[3]]
+		value := strings.TrimLeft(line[match[1]:], " \t")
+		if len(value) > 0 && (value[0] == '\'' || value[0] == '"') {
+			quote := value[0]
+			closed := false
+			escaped := false
+			for {
+				for j := 1; j < len(value); j++ {
+					c := value[j]
+					if escaped {
+						escaped = false
+						continue
+					}
+					if c == '\\' {
+						escaped = true
+						continue
+					}
+					if c == quote {
+						closed = true
+						break
+					}
+				}
+				if closed {
+					break
+				}
+				i++
+				if i >= len(lines) {
+					return nil, ErrManagedCapture
+				}
+				line += lines[i]
+				value = " " + lines[i]
+			}
+		}
+		records = append(records, hermesEnvRecord{key: key, text: line})
+	}
+	return records, nil
+}
+
+func hermesManagedSetEnv(path, name, value string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	records, err := hermesEnvRecords(raw)
+	if err != nil {
+		return err
+	}
+	var out strings.Builder
+	for _, r := range records {
+		if r.key != name {
+			out.WriteString(r.text)
+		}
+	}
+	if err := os.WriteFile(path, []byte(out.String()), 0600); err != nil {
+		return err
+	}
+	return edit.SetEnvFile(path, edit.KV{Path: name, Value: value})
 }
