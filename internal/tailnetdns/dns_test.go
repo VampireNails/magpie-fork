@@ -12,7 +12,12 @@ import (
 )
 
 func TestFallbackUsesMatchedNodeAndVerifiesTLS(t *testing.T) {
-	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
+	s := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || r.TLS.ServerName != "example.com" {
+			t.Error("original SNI was not retained")
+		}
+		w.WriteHeader(204)
+	}))
 	defer s.Close()
 	_, port, _ := net.SplitHostPort(s.Listener.Addr().String())
 	old := lookup
