@@ -700,6 +700,10 @@ func Routings() ([]string, error) {
 // that a read at that moment sees the old catalog or the new one, never a
 // file cut short.
 func store(f file) error {
+	return storeNotifying(f, true)
+}
+
+func storeNotifying(f file, notify bool) error {
 	p := Path()
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
@@ -722,7 +726,11 @@ func store(f file) error {
 	}
 	pruneIcons(f)
 	// what agents were handed of the catalog may be out of date now
-	catalog.Touched()
+	if notify {
+		catalog.Touched()
+	} else {
+		catalog.ForgetHeld()
+	}
 	return nil
 }
 

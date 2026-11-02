@@ -18,6 +18,7 @@ import (
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 // A vendor's own /models endpoint is the truth about what it serves today;
@@ -203,6 +204,15 @@ func SaveLive(provider, base string, models []Model) error {
 // their own asks every base, and a base that can't be asked next time has to
 // know which of the models were its own to keep (#904).
 func SaveLiveSides(provider, base string, models []Model, sides map[string][]Model) error {
+	return saveLiveSides(provider, base, models, sides, true)
+}
+
+// SaveLiveSidesQuiet keeps a list without scheduling agent synchronization.
+func SaveLiveSidesQuiet(provider, base string, models []Model, sides map[string][]Model) error {
+	return saveLiveSides(provider, base, models, sides, false)
+}
+
+func saveLiveSides(provider, base string, models []Model, sides map[string][]Model, notify bool) error {
 	p := LivePath(provider)
 	if len(models) == 0 {
 		err := os.Remove(p)
@@ -210,7 +220,11 @@ func SaveLiveSides(provider, base string, models []Model, sides map[string][]Mod
 			return nil
 		}
 		if err == nil {
-			Touched()
+			if notify {
+				Touched()
+			} else {
+				ForgetHeld()
+			}
 		}
 		return err
 	}
@@ -218,10 +232,18 @@ func SaveLiveSides(provider, base string, models []Model, sides map[string][]Mod
 		return err
 	}
 	b, _ := json.MarshalIndent(liveFile{Fetched: time.Now(), Base: base, Models: models, Sides: sides}, "", "  ")
-	if err := os.WriteFile(p, b, 0o644); err != nil {
+	write := os.WriteFile
+	if !notify {
+		write = steady.WriteFile
+	}
+	if err := write(p, b, 0o644); err != nil {
 		return err
 	}
-	Touched()
+	if notify {
+		Touched()
+	} else {
+		ForgetHeld()
+	}
 	return nil
 }
 
@@ -234,6 +256,13 @@ var Changed func()
 // Forget, when set, is told so first: the provider package drops the
 // catalog a request holds (provider.Hold).
 var Forget func()
+
+// ForgetHeld invalidates cached views without scheduling agent writes.
+func ForgetHeld() {
+	if Forget != nil {
+		Forget()
+	}
+}
 
 // Touched tells Forget and Changed, if set.
 func Touched() {
@@ -556,7 +585,13 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 		for k, v := range headers {
 			PutUserHeader(req.Header, k, v)
 		}
-		res, err := http.DefaultClient.Do(req)
+		client := http.DefaultClient
+		if headers["X-Magpie-Drawers"] != "" {
+			copy := *client
+			copy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+			client = &copy
+		}
+		res, err := client.Do(req)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -581,6 +616,9 @@ func fetchPage(ctx context.Context, url, key string, anthropic bool, headers map
 		}
 	}
 	if res.StatusCode != http.StatusOK {
+		if headers["X-Magpie-Drawers"] != "" {
+			return nil, false, "", fmt.Errorf("remote model list: HTTP %d", res.StatusCode)
+		}
 		if msg := errorMessage(b); msg != "" {
 			return nil, false, "", fmt.Errorf("%s: %s (%s)", url, res.Status, msg)
 		}

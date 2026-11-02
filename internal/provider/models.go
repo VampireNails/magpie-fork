@@ -248,12 +248,25 @@ func (p Provider) RefetchTaking(ctx context.Context) (ms []catalog.Model, droppe
 	if err != nil || !p.ownList() || len(p.AutoInclude) == 0 {
 		return ms, dropped, nil, err
 	}
-	taken, terr := takeMatching(p.ID, func(id string) bool { return !before[id] })
+	taken, terr := takeMatchingWithNotify(p.ID, func(id string) bool { return !before[id] }, !quietRemote(ctx))
 	if terr != nil {
 		log.Println(p.ID + ": " + terr.Error())
 	}
 	return ms, dropped, taken, nil
 }
+
+type quietRemoteKey struct{}
+
+// RefetchRemoteQuiet preserves native discovery without scheduling agent writes.
+func (p Provider) RefetchRemoteQuiet(ctx context.Context) error {
+	if !p.IsRemoteMagpie() {
+		return errors.New("not a remote provider")
+	}
+	_, _, _, err := p.RefetchTaking(context.WithValue(ctx, quietRemoteKey{}, true))
+	return err
+}
+
+func quietRemote(ctx context.Context) bool { return ctx.Value(quietRemoteKey{}) == true }
 
 // refetch is Refetch, with the ids the provider's list had before it
 // (none for an account's, a plugin's or a decision-only provider's).
@@ -282,12 +295,15 @@ func (p Provider) refetch(ctx context.Context) ([]catalog.Model, []string, map[s
 		}
 	}
 	if err != nil {
+		if p.IsRemoteMagpie() {
+			return nil, nil, before, errors.New("remote model list unavailable or invalid")
+		}
 		return ms, nil, before, err
 	}
 	if len(before) == 0 {
 		// nothing to drop against, but a pick set aside comes back
 		if now := liveIDs(p.ID); len(now) > 0 && len(p.Delisted) > 0 {
-			if _, derr := dropGonePicks(p.ID, nil, now); derr != nil {
+			if _, derr := dropGonePicksWithNotify(p.ID, nil, now, !quietRemote(ctx)); derr != nil {
 				log.Println(p.ID + ": " + derr.Error())
 			}
 		}
@@ -297,7 +313,7 @@ func (p Provider) refetch(ctx context.Context) ([]catalog.Model, []string, map[s
 	if len(now) == 0 {
 		return ms, nil, before, nil
 	}
-	dropped, derr := dropGonePicks(p.ID, before, now)
+	dropped, derr := dropGonePicksWithNotify(p.ID, before, now, !quietRemote(ctx))
 	if derr != nil {
 		log.Println(p.ID + ": " + derr.Error())
 	}
@@ -322,6 +338,10 @@ func liveIDs(id string) map[string]bool {
 // not forgotten, and those of its Delisted now has go back among the picks
 // (relistPicks): a list that shrank for a while gives back what it took.
 func dropGonePicks(id string, before, now map[string]bool) ([]string, error) {
+	return dropGonePicksWithNotify(id, before, now, true)
+}
+
+func dropGonePicksWithNotify(id string, before, now map[string]bool, notify bool) ([]string, error) {
 	f, err := read()
 	if err != nil {
 		return nil, err
@@ -351,7 +371,7 @@ func dropGonePicks(id string, before, now map[string]bool) ([]string, error) {
 			}
 		}
 	}
-	return dropped, store(f)
+	return dropped, storeNotifying(f, notify)
 }
 
 // relistPicks puts back among q's picks those of its Delisted the list now
@@ -430,6 +450,9 @@ func (p Provider) fetch(ctx context.Context) ([]catalog.Model, error) {
 	l, err := p.fetchOne(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if quietRemote(ctx) {
+		return catalog.Chat(l.models), catalog.SaveLiveSidesQuiet(p.ID, l.base, l.models, l.sides)
 	}
 	return catalog.Chat(l.models), catalog.SaveLiveSides(p.ID, l.base, l.models, l.sides)
 }

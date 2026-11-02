@@ -196,6 +196,10 @@ func SetAutoInclude(id string, rules []string) ([]string, error) {
 // picked), so nothing served is taken away; with nothing to add nothing is
 // written.
 func takeMatching(id string, isNew func(string) bool) ([]string, error) {
+	return takeMatchingWithNotify(id, isNew, true)
+}
+
+func takeMatchingWithNotify(id string, isNew func(string) bool, notify bool) ([]string, error) {
 	p, err := Find(id)
 	if err != nil {
 		return nil, err
@@ -244,7 +248,7 @@ func takeMatching(id string, isNew func(string) bool) ([]string, error) {
 	for _, m := range avail {
 		q.PickedFrom = append(q.PickedFrom, m.ID)
 	}
-	if err := store(f); err != nil {
+	if err := storeNotifying(f, notify); err != nil {
 		return nil, err
 	}
 	return taken, nil
