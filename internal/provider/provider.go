@@ -10,7 +10,6 @@ package provider
 import (
 	"bytes"
 	"cmp"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +27,6 @@ import (
 
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/catalog"
-	"github.com/yetone/magpie/internal/filelock"
 	"github.com/yetone/magpie/internal/filememo"
 	"github.com/yetone/magpie/internal/lastgood"
 	"github.com/yetone/magpie/internal/settings"
@@ -553,10 +551,8 @@ type Provider struct {
 }
 
 type file struct {
-	generation [32]byte
-	checked    bool
-	Providers  []Provider `json:"providers"`
-	Groups     []Group    `json:"groups,omitempty"`
+	Providers []Provider `json:"providers"`
+	Groups    []Group    `json:"groups,omitempty"`
 	// Searches are the web search APIs a model's search goes to when no
 	// provider can search (see search_api.go).
 	Searches []SearchAPI `json:"searches,omitempty"`
@@ -640,7 +636,6 @@ func read() (file, error) {
 	var f file
 	b, err := steady.ReadFile(Path())
 	if errors.Is(err, os.ErrNotExist) {
-		f.checked = true
 		return f, nil
 	}
 	if err != nil {
@@ -649,7 +644,6 @@ func read() (file, error) {
 	// An editor that saves with a byte-order mark leaves JSON that Go's
 	// decoder refuses; read as broken, the file fell back to its .bak, an
 	// older generation without what was saved since (#1821).
-	generation := sha256.Sum256(b)
 	b = bytes.TrimPrefix(b, utf8BOM)
 	if err := json.Unmarshal(b, &f); err != nil {
 		// one left all zero by a crash (#1505) is its last good generation
@@ -662,8 +656,6 @@ func read() (file, error) {
 			return file{}, &unreadableError{Path(), err}
 		}
 	}
-	f.generation = generation
-	f.checked = true
 	return f, nil
 }
 
@@ -709,24 +701,6 @@ func Routings() ([]string, error) {
 // file cut short.
 func store(f file) error {
 	p := Path()
-	unlock, held := filelock.Lock(p+".lock", filelock.Wait)
-	if !held {
-		return errors.New("provider store lock unavailable")
-	}
-	defer unlock()
-	if f.checked {
-		b, err := steady.ReadFile(p)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return errors.New("provider store read failed")
-		}
-		var generation [32]byte
-		if err == nil {
-			generation = sha256.Sum256(b)
-		}
-		if generation != f.generation {
-			return errors.New("provider store changed; retry")
-		}
-	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
