@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/edit"
 	"github.com/yetone/magpie/internal/proc"
 	"github.com/yetone/magpie/internal/provider"
 )
@@ -424,4 +425,226 @@ func managedWorkBuddyBytes(t *testing.T, path string) []byte {
 		t.Fatal("read fixture:", err)
 	}
 	return b
+}
+
+func TestManagedWorkBuddyRestoreOppositeBOM(t *testing.T) {
+	for _, baselineBOM := range []bool{false, true} {
+		t.Run(fmt.Sprint(baselineBOM), func(t *testing.T) {
+			a := managedWorkBuddyFixture(t)
+			original, current := "[]\r\n", "{\"models\":[],\"manual\":true}\n"
+			if baselineBOM {
+				original = "\xef\xbb\xbf" + original
+			} else {
+				current = "\xef\xbb\xbf" + current
+			}
+			managedWorkBuddyPut(t, a.Path, original, 0o640)
+			before, err := os.Stat(a.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, session, adapter := managedWorkBuddyBegin(t, a)
+			managedWorkBuddyWrite(t, a, session, func() error { return a.Field("provider").Set(magpieID) })
+			managedWorkBuddyPut(t, a.Path, current, 0o600)
+			if err := store.RestoreManaged(a.ID, adapter); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(managedWorkBuddyBytes(t, a.Path), []byte(original)) {
+				t.Fatal("restore inherited current BOM instead of exact B0")
+			}
+			after, err := os.Stat(a.Path)
+			if err != nil || after.Mode().Perm() != before.Mode().Perm() {
+				t.Fatal("B0 mode not restored")
+			}
+		})
+	}
+}
+
+func TestManagedWorkBuddyRestoreBypassesEditFilter(t *testing.T) {
+	a := managedWorkBuddyFixture(t)
+	const original = "[]\n"
+	managedWorkBuddyPut(t, a.Path, original, 0o600)
+	store, session, adapter := managedWorkBuddyBegin(t, a)
+	managedWorkBuddyWrite(t, a, session, func() error { return a.Field("provider").Set(magpieID) })
+	if err := edit.Filtered(func(path string, data []byte) []byte {
+		if path == a.Path {
+			return []byte("{\"models\":[],\"filter\":true}")
+		}
+		return data
+	}, func() error { return store.RestoreManaged(a.ID, adapter) }); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(managedWorkBuddyBytes(t, a.Path), []byte(original)) {
+		t.Fatal("restore transformed B0 through edit filter")
+	}
+}
+
+func TestManagedWorkBuddyHardLinkBeforeJoin(t *testing.T) {
+	a := managedWorkBuddyFixture(t)
+	const original = "[]\n"
+	managedWorkBuddyPut(t, a.Path, original, 0o600)
+	other := filepath.Join(a.Dir, "other.json")
+	if err := os.Link(a.Path, other); err != nil {
+		t.Fatal("create same-volume hard link:", err)
+	}
+	adapter, targets, err := ManagedWorkBuddy(a)
+	if err == nil {
+		store, storeErr := NewManagedStore(filepath.Join(t.TempDir(), "journal"))
+		if storeErr != nil {
+			t.Fatal(storeErr)
+		}
+		session, beginErr := store.BeginManaged(a.ID, adapter, targets...)
+		if beginErr == nil {
+			err = session.BeforeManagedWrite(func(w *ManagedWrite) error {
+				if err := BeforeManagedWorkBuddyWrite(w, a); err != nil {
+					return err
+				}
+				return a.Field("provider").Set(magpieID)
+			})
+		} else {
+			err = beginErr
+		}
+	}
+	if !bytes.Equal(managedWorkBuddyBytes(t, other), []byte(original)) {
+		t.Error("native join changed non-target hard-link inode")
+	}
+	if err == nil {
+		t.Error("hard-linked target authorized join")
+	}
+}
+
+func TestManagedWorkBuddyHardLinkReplacement(t *testing.T) {
+	for _, operation := range []string{"restore", "set", "sync"} {
+		t.Run(operation, func(t *testing.T) {
+			a := managedWorkBuddyFixture(t)
+			const original = "[]\n"
+			const unrelated = "{\"models\":[],\"manual\":\"other-file\"}\n"
+			managedWorkBuddyPut(t, a.Path, original, 0o640)
+			before, err := os.Stat(a.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, session, adapter := managedWorkBuddyBegin(t, a)
+			managedWorkBuddyWrite(t, a, session, func() error { return a.Field("provider").Set(magpieID) })
+			other := filepath.Join(a.Dir, "other.json")
+			managedWorkBuddyPut(t, other, unrelated, 0o600)
+			if err := os.Remove(a.Path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(other, a.Path); err != nil {
+				t.Fatal("replace with same-volume hard link:", err)
+			}
+			if operation == "restore" {
+				err = store.RestoreManaged(a.ID, adapter)
+			} else {
+				err = session.BeforeManagedWrite(func(w *ManagedWrite) error {
+					if err := BeforeManagedWorkBuddyWrite(w, a); err != nil {
+						return err
+					}
+					if operation == "sync" {
+						return a.Sync()
+					}
+					return a.Field("provider").Set(magpieID)
+				})
+			}
+			if !bytes.Equal(managedWorkBuddyBytes(t, other), []byte(unrelated)) {
+				t.Error("operation changed non-target hard-link inode")
+			}
+			status, statusErr := store.ManagedState(a.ID)
+			if err == nil || statusErr != nil || status.Phase == ManagedDetached || status.Pending != 1 {
+				t.Error("unsafe replacement did not retain retryable snapshot")
+			}
+			if err := os.Remove(a.Path); err != nil {
+				t.Fatal(err)
+			}
+			managedWorkBuddyPut(t, a.Path, "{}", 0o600)
+			if err := store.RestoreManaged(a.ID, adapter); err != nil {
+				t.Fatal("safe-path retry:", err)
+			}
+			if !bytes.Equal(managedWorkBuddyBytes(t, a.Path), []byte(original)) {
+				t.Error("retry lost B0 bytes")
+			}
+			after, err := os.Stat(a.Path)
+			if err != nil || after.Mode().Perm() != before.Mode().Perm() {
+				t.Error("retry lost B0 mode")
+			}
+			if !bytes.Equal(managedWorkBuddyBytes(t, other), []byte(unrelated)) {
+				t.Error("retry modified other file")
+			}
+			status, err = store.ManagedState(a.ID)
+			if err != nil || status.Phase != ManagedDetached || status.Pending != 0 {
+				t.Error("successful retry not detached")
+			}
+		})
+	}
+}
+
+func TestManagedWorkBuddyInvalidUTF8StopsNativeWrites(t *testing.T) {
+	const canary = "CANARY-invalid-encoding-612"
+	for name, data := range map[string]string{
+		"model":           "[{\"id\":\"" + canary + "\xff\"}]",
+		"other-field":     "{\"models\":[],\"custom\":\"" + canary + "\xff\"}",
+		"availableModels": "{\"models\":[],\"availableModels\":[\"" + canary + "\xff\"]}",
+		"bom":             "\xef\xbb\xbf[{\"id\":\"" + canary + "\xff\"}]",
+	} {
+		for _, stage := range []string{"capture", "later"} {
+			for _, operation := range []string{"set", "sync"} {
+				t.Run(name+"/"+stage+"/"+operation, func(t *testing.T) {
+					a := managedWorkBuddyFixture(t)
+					managedWorkBuddyPut(t, a.Path, "[]\n", 0o600)
+					store, err := NewManagedStore(filepath.Join(t.TempDir(), "journal"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					adapter, targets, err := ManagedWorkBuddy(a)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var session *ManagedSession
+					if stage == "later" {
+						session, err = store.BeginManaged(a.ID, adapter, targets...)
+						if err != nil {
+							t.Fatal(err)
+						}
+						managedWorkBuddyWrite(t, a, session, func() error { return a.Field("provider").Set(magpieID) })
+					}
+					managedWorkBuddyPut(t, a.Path, data, 0o600)
+					if stage == "capture" {
+						session, err = store.BeginManaged(a.ID, adapter, targets...)
+					}
+					called := false
+					if err == nil {
+						err = session.BeforeManagedWrite(func(w *ManagedWrite) error {
+							if err := BeforeManagedWorkBuddyWrite(w, a); err != nil {
+								return err
+							}
+							called = true
+							if operation == "sync" {
+								return a.Sync()
+							}
+							return a.Field("provider").Set(magpieID)
+						})
+					}
+					if err == nil || called {
+						t.Error("invalid UTF-8 reached native " + operation)
+					}
+					if !bytes.Equal(managedWorkBuddyBytes(t, a.Path), []byte(data)) {
+						t.Error("invalid UTF-8 file was changed")
+					}
+					status, statusErr := store.ManagedState(a.ID)
+					encoded, _ := json.Marshal(status)
+					if statusErr != nil || strings.Contains(fmt.Sprint(err), canary) || bytes.Contains(encoded, []byte(canary)) {
+						t.Error("diagnostics unavailable or leaked secret")
+					}
+					if stage == "later" {
+						if err := store.RestoreManaged(a.ID, adapter); err != nil {
+							t.Fatal(err)
+						}
+						if string(managedWorkBuddyBytes(t, a.Path)) != "[]\n" {
+							t.Error("rejected write lost original baseline")
+						}
+					}
+				})
+			}
+		}
+	}
 }

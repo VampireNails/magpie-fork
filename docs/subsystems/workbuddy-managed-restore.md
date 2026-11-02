@@ -4,7 +4,7 @@
 transaction to the native WorkBuddy connector's exact `models.json` file.
 It captures its bytes, existence and permission bits before a generation's
 first write. Arrays and objects are supported; invalid or unknown data fails
-closed. The snapshot is private journal data, never status or diagnostic text.
+closed, including invalid UTF-8 after an optional BOM. Hard-linked model files are rejected before capture, native writes and restoration; an unfinished journal remains available for retry after the path is made safe. The snapshot is private journal data, never status or diagnostic text.
 
 S8 owns the entry guard. It must obtain the native WorkBuddy `Agent`, call
 `ManagedWorkBuddy`, and pass its target to `BeginManaged` before connecting.
@@ -18,7 +18,7 @@ Before `RestoreManaged`, S8 must block and drain the agent's native writes.
 It must supply an idempotent, non-reentrant `Cleanup` for only the native
 WorkBuddy bookkeeping it changes. It must not call `Disconnect` from the
 cleanup or roll back the shared stash/applied files. Restoration writes the
-original file bytes, then finalizes its original mode, or removes the file
+original file bytes through a flushed temporary file without edit filters or inheriting the current BOM, then finalizes its original mode, or removes the file
 when it was absent. Failed restoration retains the transaction for retry.
 The adapter alone does not guard public entry points or provide offline policy.
 

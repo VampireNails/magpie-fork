@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
-	"github.com/yetone/magpie/internal/edit"
+	"github.com/yetone/magpie/internal/filememo"
+	"github.com/yetone/magpie/internal/steady"
 )
 
 var errManagedWorkBuddySchema = errors.New("workbuddy: unknown models.json schema")
@@ -28,7 +30,7 @@ func validateManagedWorkBuddy(path string) error {
 
 func managedWorkBuddySchema(b []byte) error {
 	b = bytes.TrimSpace(bytes.TrimPrefix(b, []byte{0xef, 0xbb, 0xbf}))
-	if len(b) == 0 {
+	if len(b) == 0 || !utf8.Valid(b) {
 		return errManagedWorkBuddySchema
 	}
 	models := b
@@ -85,6 +87,9 @@ func managedWorkBuddyTarget(a *Agent) (ManagedTarget, error) {
 			break
 		}
 	}
+	if err := managedWorkBuddySingleLink(p); err != nil {
+		return ManagedTarget{}, err
+	}
 	return ManagedTarget{Path: p, Scope: "models-file", Kind: "workbuddy-models-bytes-v1"}, nil
 }
 
@@ -137,7 +142,11 @@ func ManagedWorkBuddy(a *Agent) (ManagedAdapter, []ManagedTarget, error) {
 		if err := managedWorkBuddySchema(snapshot.Value); err != nil {
 			return err
 		}
-		return edit.WriteAtomic(t.Path, snapshot.Value)
+		if err := os.MkdirAll(filepath.Dir(t.Path), 0o755); err != nil {
+			return err
+		}
+		defer filememo.Forget()
+		return steady.WriteFile(t.Path, snapshot.Value, os.FileMode(snapshot.Mode))
 	}
 	adapter.Finalize = func(baseline ManagedFileBaseline) error {
 		if baseline.Path != target.Path || validate(target) != nil {
