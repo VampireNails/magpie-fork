@@ -320,8 +320,8 @@ because there is nothing to pick. `magpie aionui add` opens the link.
 
 `ManagedStore` ([managed_session.go](../../internal/agent/managed_session.go),
 [managed_store.go](../../internal/agent/managed_store.go)) is a local-only
-transaction primitive. It is not wired into `Apply`, `Disconnect`, `SyncCatalog`,
-WorkBuddy, or Hermes. Those callers and adapters must be integrated before it
+transaction primitive. The candidate managed-entry controller connects it to `Apply`, `Disconnect`, `SyncCatalog`,
+WorkBuddy and Hermes; production owner and lifecycle integration is pending before it
 changes user-visible behavior. The store persists a per-agent schema-versioned
 journal before authorizing a write, retains each target's first snapshot, and
 captures later discovered targets within the same write lease. A restart must
@@ -355,8 +355,8 @@ error before writing. Hooks and callbacks must not perform network requests,
 reenter a public managed method, or retain the scoped object. Integration must
 stop and drain native sync before restore and use an internal non-reentrant
 cleanup implementation; calling a lock-taking `Disconnect` inside the callback
-can deadlock. Store locks do not yet guard native public entry points.
+can deadlock. Managed entry guards native public entry points when configured; the production owner remains pending.
 
-## Remote client guard (interim)
+## Remote managed entry (candidate)
 
-When a remote connection file or an agent journal is present, `Apply`, `Pick` and `ConnectHow` reject WorkBuddy and Hermes without a resident owner, and `SyncCatalog` skips them. This conservative guard does not implement managed recovery or owner IPC. Other automatic writers and disconnect are not yet guarded; this interim change is not a complete remote-client integration. See [`managed_entry.go`](../../internal/agent/managed_entry.go).
+A configured remote client guards WorkBuddy and Hermes public entry points and background catalog writes through [managed_entry.go](../../internal/agent/managed_entry.go). The resident runner installs the controller only after obtaining its OS owner lock, calls Recover before networking, and publishes its live owner and connected state. A detached agent begins a generation only on an explicit entry. Sync and automatic writes use the existing generation; Restore blocks and drains them before restoring the journal. Close restores before unregistering the same controller, and failure leaves it registered for retry. A separate CLI without the resident owner gets an explicit error. Hermes keeps its adapter-owned cleanup; WorkBuddy cleanup removes only its bookkeeping. Integration is provisional pending adapter fixes, cross-process owner transfer, and platform verification.
