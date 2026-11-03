@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/provider"
 )
 
 type entryLifecycleFixture struct {
@@ -20,6 +21,81 @@ type entryLifecycleFixture struct {
 	m          *ManagedEntries
 	key, value string
 	baseline   []byte
+}
+
+func TestManagedEntryDisconnectFailureBlocksWritesUntilRetry(t *testing.T) {
+	for _, phase := range []ManagedPhase{ManagedActive, ManagedRestoring} {
+		t.Run(string(phase), func(t *testing.T) {
+			f := entryLifecycleSetup(t, "workbuddy")
+			home, _ := homes()
+			other := hermes(home)
+			if err := other.Apply("model", "magpie/fixture/one"); err != nil {
+				t.Fatal(err)
+			}
+			disconnect := f.a.Disconnect
+			var repair func() error
+			if phase == ManagedActive {
+				saved := f.a.Path + ".held-by-test"
+				if err := os.Rename(f.a.Path, saved); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(f.a.Path, 0700); err != nil {
+					t.Fatal(err)
+				}
+				repair = func() error {
+					if err := os.Remove(f.a.Path); err != nil {
+						return err
+					}
+					return os.Rename(saved, f.a.Path)
+				}
+			} else {
+				// Invalid stash fails cleanup after the journal enters restoring.
+				p := stashPath()
+				original := managedEntryBytes(t, p)
+				if err := os.WriteFile(p, []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				repair = func() error { return os.WriteFile(p, original, 0600) }
+				disconnect = f.a.DisconnectOffline
+			}
+			if err := disconnect(); err == nil {
+				t.Fatal("expected restore failure")
+			}
+			if err := repair(); err != nil {
+				t.Fatal(err)
+			}
+			state, err := f.store.ManagedState(f.a.ID)
+			if err != nil || state.Phase != phase {
+				t.Fatalf("failed restore state: %+v, %v", state, err)
+			}
+			before := entryLifecycleSnapshot(t, f)
+			if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Chat: "https://fixture.invalid/v1", Key: "synthetic", Models: []string{"one", "two"}}); err != nil {
+				t.Fatal(err)
+			}
+			SyncCatalog()
+			SyncCatalogSettled()
+			if !reflect.DeepEqual(before, entryLifecycleSnapshot(t, f)) {
+				t.Error("background sync changed the agent or journal before restore retry")
+			}
+			before = entryLifecycleSnapshot(t, f)
+			if err := f.a.Apply(f.key, f.value); !errors.Is(err, ErrManagedRecovery) {
+				t.Errorf("apply before restore retry = %v", err)
+			}
+			if !reflect.DeepEqual(before, entryLifecycleSnapshot(t, f)) {
+				t.Error("apply changed the agent or journal before restore retry")
+			}
+			if err := other.Apply("model", "magpie/fixture/two"); err != nil {
+				t.Fatalf("other agent blocked: %v", err)
+			}
+			if err := disconnect(); err != nil {
+				t.Fatal(err)
+			}
+			entryLifecycleBaseline(t, f)
+			if err := f.a.Apply(f.key, f.value); err != nil {
+				t.Fatalf("apply after successful retry: %v", err)
+			}
+		})
+	}
 }
 
 func entryLifecycleSetup(t *testing.T, id string) entryLifecycleFixture {

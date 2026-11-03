@@ -45,8 +45,9 @@ type ManagedEntries struct {
 	disconnectLoaded func()
 }
 type managedEntrySlot struct {
-	mu      sync.Mutex
-	session *ManagedSession
+	mu             sync.Mutex
+	session        *ManagedSession
+	restorePending bool // guarded by mu, including failures before journal update
 }
 
 var managedOwners sync.Map // config directory -> *ManagedEntries
@@ -103,13 +104,7 @@ func (m *ManagedEntries) restore() error {
 	for _, a := range []*Agent{workbuddy(home), hermes(home)} {
 		slot := m.slots[a.ID]
 		slot.mu.Lock()
-		adapter, _, err := managedAdapterFor(a)
-		if err == nil {
-			err = m.store.RestoreManaged(a.ID, adapter)
-		}
-		if err == nil {
-			slot.session = nil
-		} else {
+		if err := m.restoreAgent(a, slot); err != nil {
 			errs = append(errs, err)
 		}
 		slot.mu.Unlock()
@@ -197,6 +192,9 @@ func managedEntryWrite(a *Agent, explicit bool, fn func(*Agent) error) (bool, er
 	if !ready {
 		return true, ErrManagedOwnerRequired
 	}
+	if slot.restorePending {
+		return true, ErrManagedRecovery
+	}
 	if slot.session == nil {
 		if !explicit {
 			return true, nil
@@ -248,12 +246,20 @@ func managedEntryDisconnect(a *Agent) (bool, error) {
 	if current, ok := managedOwners.Load(m.key); m.closed || !ok || current != m {
 		return true, ErrManagedStale
 	}
+	return true, m.restoreAgent(a, slot)
+}
+
+// restoreAgent requires the lifecycle and slot locks. Block writes even if
+// adapter validation or journal access fails before recording restoration.
+func (m *ManagedEntries) restoreAgent(a *Agent, slot *managedEntrySlot) error {
+	slot.restorePending = true
 	adapter, _, err := managedAdapterFor(a)
 	if err == nil {
 		err = m.store.RestoreManaged(a.ID, adapter)
 	}
 	if err == nil {
 		slot.session = nil
+		slot.restorePending = false
 	}
-	return true, err
+	return err
 }
