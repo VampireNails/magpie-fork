@@ -483,3 +483,44 @@ func TestManagedHermesEnvPositionConflictRetries(t *testing.T) {
 		t.Error("retry did not restore assignments in order")
 	}
 }
+
+func TestManagedHermesEnvSameCountMovedRetries(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".env")
+	initial := "MY_KEY=one\nOTHER=before\nMY_KEY=two\n"
+	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := HermesManagedAdapter(root)
+	store, err := NewManagedStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := hermesManagedTarget(path, "MY_KEY")
+	session, err := store.BeginManaged("hermes", a, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.BeforeManagedWrite(func(w *ManagedWrite) error { return hermesManagedSetEnv(path, "MY_KEY", "fixture") }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("OTHER=later\nMY_KEY=fixture\nMY_KEY=fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RestoreManaged("hermes", a); err == nil {
+		t.Fatal("same-count moved assignments restored")
+	}
+	if err := os.WriteFile(path, []byte("EXTRA=new\nMY_KEY=fixture\nOTHER=later\nMY_KEY=fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RestoreManaged("hermes", a); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "EXTRA=new\nMY_KEY=one\nOTHER=later\nMY_KEY=two\n" {
+		t.Error("retry lost order or unrelated edit")
+	}
+}

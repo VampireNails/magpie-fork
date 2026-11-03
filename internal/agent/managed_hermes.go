@@ -2,8 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -155,19 +157,30 @@ func hermesManagedCapture(t ManagedTarget) (ManagedSnapshot, error) {
 		if err != nil {
 			return s, err
 		}
-		var lines []string
+		var saved hermesEnvSnapshot
+		counts := map[string]int{}
 		for _, record := range records {
 			if record.key == t.Scope {
-				lines = append(lines, record.text)
+				saved.Lines = append(saved.Lines, record.text)
+				continue
+			}
+			if anchor := hermesEnvAnchor(record); anchor != "" {
+				counts[anchor]++
+				saved.Anchors = append(saved.Anchors, hermesEnvAnchorAt{ID: anchor, Before: len(saved.Lines)})
 			}
 		}
-		s.Exists = len(lines) > 0
+		s.Exists = len(saved.Lines) > 0
 		if s.Exists {
-			encoded, e := json.Marshal(lines)
+			for _, n := range counts {
+				if n != 1 {
+					return s, ErrManagedCapture
+				}
+			}
+			encoded, e := json.Marshal(saved)
 			if e != nil {
 				return s, e
 			}
-			s.Value = append([]byte("hermes-env-lines-v1:"), encoded...)
+			s.Value = append([]byte("hermes-env-anchors-v2:"), encoded...)
 		}
 		return s, nil
 	}
@@ -256,13 +269,22 @@ func hermesManagedRestoreStaged(t ManagedTarget, s ManagedSnapshot) error {
 
 func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 	if t.Kind == managedHermesEnv {
-		const prefix = "hermes-env-lines-v1:"
-		if s.Exists && !bytes.HasPrefix(s.Value, []byte(prefix)) {
-			return edit.SetEnvFile(t.Path, edit.KV{Path: t.Scope, Value: string(s.Value)})
-		}
+		const oldPrefix = "hermes-env-lines-v1:"
+		const prefix = "hermes-env-anchors-v2:"
 		var original []string
-		if s.Exists && json.Unmarshal(s.Value[len(prefix):], &original) != nil {
-			return ErrManagedRestore
+		var saved hermesEnvSnapshot
+		anchored := s.Exists && bytes.HasPrefix(s.Value, []byte(prefix))
+		if anchored {
+			if json.Unmarshal(s.Value[len(prefix):], &saved) != nil {
+				return ErrManagedRestore
+			}
+			original = saved.Lines
+		} else if s.Exists && bytes.HasPrefix(s.Value, []byte(oldPrefix)) {
+			if json.Unmarshal(s.Value[len(oldPrefix):], &original) != nil || len(original) > 1 {
+				return ErrManagedRestore
+			}
+		} else if s.Exists {
+			return edit.SetEnvFile(t.Path, edit.KV{Path: t.Scope, Value: string(s.Value)})
 		}
 		raw, exists, _, err := hermesManagedRead(t.Path)
 		if err != nil {
@@ -274,6 +296,9 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 		records, err := hermesEnvRecords(raw)
 		if err != nil {
 			return err
+		}
+		if anchored && !hermesEnvAnchorsMatch(records, t.Scope, saved.Anchors) {
+			return ErrManagedRestore
 		}
 		var out strings.Builder
 		count := 0
@@ -718,4 +743,53 @@ func hermesManagedSetEnv(path, name, value string) error {
 		out.WriteByte('\n')
 	}
 	return os.WriteFile(path, []byte(out.String()), 0600)
+}
+
+type hermesEnvAnchorAt struct {
+	ID     string `json:"id"`
+	Before int    `json:"before"`
+}
+type hermesEnvSnapshot struct {
+	Lines   []string            `json:"lines"`
+	Anchors []hermesEnvAnchorAt `json:"anchors"`
+}
+
+func hermesEnvAnchor(r hermesEnvRecord) string {
+	if r.key != "" {
+		return "key:" + r.key
+	}
+	if strings.TrimSpace(r.text) == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(r.text))
+	return fmt.Sprintf("line:%x", sum)
+}
+func hermesEnvAnchorsMatch(records []hermesEnvRecord, scope string, anchors []hermesEnvAnchorAt) bool {
+	wanted := map[string]hermesEnvAnchorAt{}
+	seen := map[string]int{}
+	for _, a := range anchors {
+		if _, ok := wanted[a.ID]; ok {
+			return false
+		}
+		wanted[a.ID] = a
+	}
+	before := 0
+	next := 0
+	for _, r := range records {
+		if r.key == scope {
+			before++
+			continue
+		}
+		id := hermesEnvAnchor(r)
+		a, ok := wanted[id]
+		if !ok {
+			continue
+		}
+		seen[id]++
+		if seen[id] != 1 || next >= len(anchors) || anchors[next].ID != id || a.Before != before {
+			return false
+		}
+		next++
+	}
+	return next == len(anchors)
 }
