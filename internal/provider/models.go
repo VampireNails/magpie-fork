@@ -715,6 +715,13 @@ type fetched struct {
 func (p Provider) fetchOne(ctx context.Context) (fetched, error) {
 	ctx = p.ownRequests(ctx, probelog.KindList) // a detection's list too
 	if p.IsRemoteMagpie() {
+		if u := strings.TrimSpace(p.ModelsURL); u != "" {
+			ms, err := catalog.FetchURL(catalog.RemoteListContext(ctx), u, p.Key, false, p.listHeadersAt(u))
+			if err != nil {
+				return fetched{}, err
+			}
+			return fetched{ms, u, nil, nil}, nil
+		}
 		base := p.Base(Chat)
 		ms, u, err := catalog.FetchAtListed(catalog.RemoteListContext(ctx), base, p.Key, false, p.listHeadersAt(base), nil)
 		if err != nil {

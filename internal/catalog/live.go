@@ -488,7 +488,7 @@ func Versioned(base string) bool {
 // FetchURL asks for the model list at exactly url.
 func FetchURL(ctx context.Context, url, key string, anthropic bool, headers map[string]string) ([]Model, error) {
 	ms, err := fetchOne(ctx, strings.TrimSpace(url), key, anthropic, headers)
-	if err == nil && len(ms) == 0 {
+	if err == nil && len(ms) == 0 && !isRemoteList(ctx) {
 		err = errors.New(url + ": no models listed")
 	}
 	return ms, err
