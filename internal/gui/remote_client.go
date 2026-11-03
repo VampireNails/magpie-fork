@@ -1,6 +1,7 @@
 package gui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,9 +86,8 @@ func localRemoteHandler(next http.Handler, service remoteClientService) http.Han
 
 func remoteBody(w http.ResponseWriter, r *http.Request, out any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
-	d := json.NewDecoder(r.Body)
-	d.DisallowUnknownFields()
-	if err := d.Decode(out); err != nil {
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			remoteError(w, 413, "REQUEST_TOO_LARGE")
@@ -96,14 +96,20 @@ func remoteBody(w http.ResponseWriter, r *http.Request, out any) bool {
 		}
 		return false
 	}
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || data[0] != '{' {
+		remoteError(w, 400, "INVALID_REQUEST")
+		return false
+	}
+	d := json.NewDecoder(bytes.NewReader(data))
+	d.DisallowUnknownFields()
+	if err := d.Decode(out); err != nil {
+		remoteError(w, 400, "INVALID_REQUEST")
+		return false
+	}
 	var extra any
 	if err := d.Decode(&extra); err != io.EOF {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			remoteError(w, 413, "REQUEST_TOO_LARGE")
-		} else {
-			remoteError(w, 400, "INVALID_REQUEST")
-		}
+		remoteError(w, 400, "INVALID_REQUEST")
 		return false
 	}
 	return true

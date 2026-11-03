@@ -100,3 +100,47 @@ func TestRemoteClientRejectsDifferentScheme(t *testing.T) {
 		t.Fatalf("foreign scheme accepted: %d", w.Code)
 	}
 }
+
+type countingRemoteFixture struct{ calls int }
+
+func (f *countingRemoteFixture) Status(context.Context) (remoteClientStatus, error) {
+	f.calls++
+	return remoteClientStatus{State: "unconfigured"}, nil
+}
+func (f *countingRemoteFixture) Connect(context.Context, string) (remoteClientStatus, error) {
+	f.calls++
+	return remoteClientStatus{State: "unconfigured"}, nil
+}
+func (f *countingRemoteFixture) Refresh(context.Context) (remoteClientStatus, error) {
+	f.calls++
+	return remoteClientStatus{State: "unconfigured"}, nil
+}
+func (f *countingRemoteFixture) Disconnect(context.Context) (remoteClientStatus, error) {
+	f.calls++
+	return remoteClientStatus{State: "paused"}, nil
+}
+func (f *countingRemoteFixture) ManagementURL(context.Context) (string, error) {
+	f.calls++
+	return "", nil
+}
+func TestRemoteClientRejectsNonObjectWithoutServiceCall(t *testing.T) {
+	for _, path := range []string{"/api/remote-connection", "/api/remote-connection/refresh", "/api/remote-connection/disconnect", "/api/remote-connection/manage"} {
+		for _, body := range []string{"null", "[]", "true", "42", `"x"`} {
+			f := &countingRemoteFixture{}
+			h := localRemoteHandler(http.NotFoundHandler(), f)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest("POST", path, strings.NewReader(body)))
+			if w.Code != 400 || f.calls != 0 {
+				t.Errorf("%s %s: status %d, calls %d", path, body, w.Code, f.calls)
+			}
+		}
+	}
+}
+func TestRemoteClientEmptyObjectCallsConnect(t *testing.T) {
+	f := &countingRemoteFixture{}
+	w := httptest.NewRecorder()
+	localRemoteHandler(http.NotFoundHandler(), f).ServeHTTP(w, httptest.NewRequest("POST", "/api/remote-connection", strings.NewReader(`{}`)))
+	if w.Code != 200 || f.calls != 1 {
+		t.Fatalf("status %d calls %d", w.Code, f.calls)
+	}
+}
