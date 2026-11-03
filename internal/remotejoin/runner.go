@@ -253,17 +253,36 @@ func (r *Runner) Stop() error {
 // StopContext blocks admission and waits for actual drain and recovery. A
 // timed-out attempt retains ownership until its work has really finished.
 func (r *Runner) StopContext(ctx context.Context) error {
-	r.stopMu.Lock()
-	if r.stopAttemptState != nil {
-		select {
-		case <-r.stopAttemptState.done:
-			if r.stopAttemptState.err != nil {
+	retried := false
+	for {
+		r.stopMu.Lock()
+		if attempt := r.stopAttemptState; attempt != nil {
+			select {
+			case <-attempt.done:
+				if attempt.err == nil {
+					r.stopMu.Unlock()
+					return nil
+				}
+				err := attempt.err
 				r.stopAttemptState = nil
+				r.stopMu.Unlock()
+				// An attempt that failed on the previous caller's context must
+				// not hand that error to a caller that still has budget.
+				if retried {
+					return err
+				}
+				retried = true
+				continue
+			default:
+				r.stopMu.Unlock()
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-attempt.done:
+				}
+				continue
 			}
-		default:
 		}
-	}
-	if r.stopAttemptState == nil {
 		r.stopping.Store(true)
 		if r.runCancel != nil {
 			r.runCancel()
@@ -275,15 +294,14 @@ func (r *Runner) StopContext(ctx context.Context) error {
 		attempt := &runnerStopAttempt{done: make(chan struct{})}
 		r.stopAttemptState = attempt
 		go func() { attempt.err = r.stopAttempt(ctx); close(attempt.done) }()
+		r.stopMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-attempt.done:
+		}
+		return attempt.err
 	}
-	attempt := r.stopAttemptState
-	r.stopMu.Unlock()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-attempt.done:
-	}
-	return attempt.err
 }
 
 func (r *Runner) stop() error { return r.Stop() }

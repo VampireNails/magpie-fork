@@ -566,6 +566,69 @@ func TestRunnerStopPreventsProbeFromReopeningAdmission(t *testing.T) {
 	}
 }
 
+// A stop attempt that ends on its caller's deadline belongs to that caller.
+// A later caller that still has budget must retry instead of inheriting it.
+func TestRunnerStopDoesNotInheritExpiredAttempt(t *testing.T) {
+	isolateStore(t)
+	m := &runnerManaged{}
+	c := NewClient(ClientOptions{Binding: &fakeBinding{}})
+	r := NewRunner(c, RunnerOptions{Managed: func() (ManagedController, error) { return m, nil }})
+	if err := r.start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the operation lock so the first attempt can only end on its own
+	// deadline, like a direct operation that outlives its caller.
+	r.op.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			r.op.Unlock()
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	first := make(chan error, 1)
+	go func() { first <- r.StopContext(ctx) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r.stopMu.Lock()
+		created := r.stopAttemptState != nil
+		r.stopMu.Unlock()
+		if created {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stop attempt was not created")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	second := make(chan error, 1)
+	go func() { second <- r.Stop() }()
+	select {
+	case err := <-first:
+		if err == nil {
+			t.Fatal("first stop did not report its own deadline")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("first stop did not return")
+	}
+	// Release the operation only after the first attempt has expired, so the
+	// joining caller sees a failed attempt rather than an in-flight one.
+	r.op.Unlock()
+	locked = false
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatalf("second stop inherited the expired attempt: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second stop did not return")
+	}
+	if s := r.snapshot(); s.State != "stopped" || s.Owner {
+		t.Fatalf("state after stop = %+v", s)
+	}
+}
+
 func TestRunnerActiveStopEndsRunAndCannotRestart(t *testing.T) {
 	isolateStore(t)
 	m := &runnerManaged{}
