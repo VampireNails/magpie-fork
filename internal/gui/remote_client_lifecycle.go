@@ -13,6 +13,7 @@ type desktopRunner interface {
 }
 type desktopRemoteLifecycle struct {
 	cancel context.CancelFunc
+	ready  <-chan struct{}
 	done   chan struct{}
 	mu     sync.Mutex
 	err    error
@@ -20,13 +21,13 @@ type desktopRemoteLifecycle struct {
 
 func startDesktopRemote(r desktopRunner) *desktopRemoteLifecycle {
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &desktopRemoteLifecycle{cancel: cancel, done: make(chan struct{})}
+	l := &desktopRemoteLifecycle{cancel: cancel, ready: r.Ready(), done: make(chan struct{})}
 	go func() { err := r.Run(ctx); l.mu.Lock(); l.err = err; l.mu.Unlock(); close(l.done) }()
 	return l
 }
 
 // waitReady never starts background work until the runner signals real recovery.
-func (l *desktopRemoteLifecycle) waitReady(ctx context.Context, r desktopRunner) error {
+func (l *desktopRemoteLifecycle) waitReady(ctx context.Context) error {
 	select {
 	case <-l.done:
 		l.mu.Lock()
@@ -35,7 +36,7 @@ func (l *desktopRemoteLifecycle) waitReady(ctx context.Context, r desktopRunner)
 			return l.err
 		}
 		return errors.New("remote runner stopped before readiness")
-	case <-r.Ready():
+	case <-l.ready:
 		select {
 		case <-l.done:
 			return errors.New("remote runner stopped")

@@ -26,11 +26,11 @@ func TestRemoteClientLifecycleWaitsForRecovery(t *testing.T) {
 	l := startDesktopRemote(f)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if err := l.waitReady(ctx, f); !errors.Is(err, context.DeadlineExceeded) {
+	if err := l.waitReady(ctx); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("premature ready: %v", err)
 	}
 	close(f.ready)
-	if err := l.waitReady(context.Background(), f); err != nil {
+	if err := l.waitReady(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	f.finish <- nil
@@ -58,4 +58,17 @@ func TestRemoteClientLifecycleShutdownIsBounded(t *testing.T) {
 	if err := l.shutdown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+func TestRemoteClientLifecycleCannotUseAnotherRunnerReadiness(t *testing.T) {
+	a := &lifecycleFixture{make(chan struct{}), make(chan error, 1)}
+	b := &lifecycleFixture{make(chan struct{}), make(chan error, 1)}
+	close(b.ready)
+	l := startDesktopRemote(a)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := l.waitReady(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("unrelated runner released barrier: %v", err)
+	}
+	a.finish <- nil
+	_ = l.shutdown(context.Background())
 }
