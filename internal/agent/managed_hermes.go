@@ -280,9 +280,7 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 			}
 			original = saved.Lines
 		} else if s.Exists && bytes.HasPrefix(s.Value, []byte(oldPrefix)) {
-			if json.Unmarshal(s.Value[len(oldPrefix):], &original) != nil || len(original) > 1 {
-				return ErrManagedRestore
-			}
+			return ErrManagedRestore
 		} else if s.Exists {
 			return edit.SetEnvFile(t.Path, edit.KV{Path: t.Scope, Value: string(s.Value)})
 		}
