@@ -470,6 +470,8 @@ func run(args []string) error {
 		return autostartCmd(args[1:])
 	case "daemon":
 		return daemonCmd(args[1:])
+	case "remote":
+		return remoteCmd(args[1:])
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return nil
