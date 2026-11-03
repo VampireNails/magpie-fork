@@ -131,7 +131,7 @@ func (c *Client) Configure(ctx context.Context, raw string) (ClientStatus, error
 	}
 	defer connectionOperations.Unlock()
 	var previous ClientStatus
-	if err = withConnection(func(f *connectionFile) (bool, error) { previous = f.ClientStatus; return false, nil }); err != nil {
+	if err = withConnectionContext(ctx, func(f *connectionFile) (bool, error) { previous = f.ClientStatus; return false, nil }); err != nil {
 		return ClientStatus{}, err
 	}
 	if previous.ServerURL != "" && previous.ServerURL != root {
@@ -142,7 +142,7 @@ func (c *Client) Configure(ctx context.Context, raw string) (ClientStatus, error
 			return previous, errors.New("managed sessions could not be restored")
 		}
 	}
-	err = withConnection(func(f *connectionFile) (bool, error) {
+	err = withConnectionContext(ctx, func(f *connectionFile) (bool, error) {
 		if f.ClientStatus != previous {
 			return false, errors.New("connection changed; retry")
 		}
@@ -179,12 +179,50 @@ func (c *Client) Refresh(ctx context.Context) (ClientStatus, error) {
 	defer connectionOperations.Unlock()
 	return c.refresh(ctx)
 }
+func (c *Client) registerOnly(ctx context.Context) (ClientStatus, error) {
+	if err := connectionOperations.LockContext(ctx, filelock.Wait); err != nil {
+		return ClientStatus{}, errors.New("connection operation lock unavailable")
+	}
+	defer connectionOperations.Unlock()
+	return c.refreshRegistration(ctx, false)
+}
+
+// refreshCatalog updates the successful sync time only after a catalog fetch.
+func (c *Client) refreshCatalog(ctx context.Context) (ClientStatus, error) {
+	if err := connectionOperations.LockContext(ctx, filelock.Wait); err != nil {
+		return ClientStatus{}, errors.New("connection operation lock unavailable")
+	}
+	defer connectionOperations.Unlock()
+	s, err := c.Status(ctx)
+	if err != nil {
+		return ClientStatus{}, err
+	}
+	if s.ServerURL == "" || s.ProviderID == "" {
+		return s, errors.New("server is not configured")
+	}
+	if err = c.binding.Refresh(ctx, s.ProviderID); err != nil {
+		return s, errors.New("model_refresh_failed")
+	}
+	err = withConnectionContext(ctx, func(f *connectionFile) (bool, error) {
+		if f.ServerURL != s.ServerURL || f.ProviderID != s.ProviderID {
+			return false, errors.New("connection changed; retry")
+		}
+		f.LastSyncAt = c.now().UTC()
+		f.LastErrorCode = ""
+		f.State = "connected"
+		return true, nil
+	})
+	if err != nil {
+		return ClientStatus{}, err
+	}
+	return c.Status(context.Background())
+}
 func (c *Client) Status(ctx context.Context) (ClientStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return ClientStatus{}, err
 	}
 	var out ClientStatus
-	err := withConnection(func(f *connectionFile) (bool, error) { out = f.ClientStatus; return false, nil })
+	err := withConnectionContext(ctx, func(f *connectionFile) (bool, error) { out = f.ClientStatus; return false, nil })
 	if err != nil {
 		return ClientStatus{}, err
 	}
@@ -204,6 +242,10 @@ func (c *Client) ManagementURL(ctx context.Context) (string, error) {
 	return s.ManagementURL, nil
 }
 func (c *Client) refresh(ctx context.Context) (ClientStatus, error) {
+	return c.refreshRegistration(ctx, true)
+}
+
+func (c *Client) refreshRegistration(ctx context.Context, refreshCatalog bool) (ClientStatus, error) {
 	s, err := c.Status(ctx)
 	if err != nil {
 		return s, err
@@ -213,7 +255,7 @@ func (c *Client) refresh(ctx context.Context) (ClientStatus, error) {
 	}
 	setDNSTarget(s.ServerURL)
 	fail := func(code string) (ClientStatus, error) {
-		storeErr := withConnection(func(f *connectionFile) (bool, error) {
+		storeErr := withConnectionContext(ctx, func(f *connectionFile) (bool, error) {
 			if f.ServerURL != s.ServerURL || f.ProviderID != s.ProviderID {
 				return false, nil
 			}
@@ -272,10 +314,13 @@ func (c *Client) refresh(ctx context.Context) (ClientStatus, error) {
 	if json.Unmarshal(raw, &r) != nil || !validRegistration(s.ServerURL, r) {
 		return fail("registration_response_invalid")
 	}
+	if err = ctx.Err(); err != nil {
+		return ClientStatus{}, err
+	}
 	if err = c.binding.Bind(s.ProviderID, s.ServerURL, r.Gateway.Key); err != nil {
 		return fail("provider_binding_failed")
 	}
-	err = withConnection(func(f *connectionFile) (bool, error) {
+	err = withConnectionContext(ctx, func(f *connectionFile) (bool, error) {
 		if f.ServerURL != s.ServerURL || f.ProviderID != s.ProviderID {
 			return false, errors.New("connection changed; retry")
 		}
@@ -289,11 +334,14 @@ func (c *Client) refresh(ctx context.Context) (ClientStatus, error) {
 	if err != nil {
 		return ClientStatus{}, err
 	}
+	if !refreshCatalog {
+		return c.Status(context.Background())
+	}
 	if err = c.binding.Refresh(ctx, s.ProviderID); err != nil {
 		return fail("model_refresh_failed")
 	}
 	now := c.now().UTC()
-	err = withConnection(func(f *connectionFile) (bool, error) {
+	err = withConnectionContext(ctx, func(f *connectionFile) (bool, error) {
 		if f.ServerURL != s.ServerURL || f.ProviderID != s.ProviderID {
 			return false, errors.New("connection changed; retry")
 		}
