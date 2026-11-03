@@ -56,7 +56,7 @@ if (window.bootPrefs?.remoteClient === true) {
       const q = id => page.querySelector("#" + id);
       q("remoteCurrent").textContent = status?.serverUrl || "";
       q("remoteStatus").textContent = say(words[status?.state] || words.unknown);
-      q("remoteSync").textContent = status?.lastSyncAt && !isNaN(Date.parse(status.lastSyncAt)) ? say("Remote connection: Last sync") + ": " + new Date(status.lastSyncAt).toLocaleString() : say("Remote connection: No sync yet");
+      q("remoteSync").textContent = status?.lastSyncAt && !isNaN(Date.parse(status.lastSyncAt)) ? say("Remote connection: Last sync") + ": " + new Date(status.lastSyncAt).toLocaleString(intlLang()) : say("Remote connection: No sync yet");
       const detail = notice || (status?.errorCode ? message(status.errorCode) : "");
       q("remoteNotice").textContent = detail && detail !== words[status?.state] ? say(detail) : "";
       q("remoteTarget").textContent = status?.state === "restore-failed" && ["workbuddy", "hermes"].includes(status.recoveryTarget) ? status.recoveryTarget : "";
