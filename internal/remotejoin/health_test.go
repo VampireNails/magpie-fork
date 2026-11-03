@@ -29,7 +29,7 @@ func TestHealthRejectsWrongShapeAndNeverReturnsActiveContent(t *testing.T) {
 	if result.Code != "health_response_invalid" || result.Healthy {
 		t.Fatal("non-concurrency response counted as healthy")
 	}
-	body = `{"object":"concurrency","data":[],"requests":1,"waiting":0,"tools":0,"active":[{"prompt":"active-secret-canary"}]}`
+	body = `{"object":"concurrency","data":{"relay-a":{}},"requests":1,"waiting":0,"tools":0,"active":[{"prompt":"active-secret-canary"}]}`
 	result = c.probeHealth(context.Background(), ClientStatus{ServerURL: server.URL, ProviderID: "remote-health"})
 	if !result.Healthy || !result.Reachable {
 		t.Fatal("native concurrency shape rejected")

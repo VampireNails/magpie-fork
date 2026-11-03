@@ -68,7 +68,7 @@ func (c *Client) probeHealth(ctx context.Context, s ClientStatus) HealthResult {
 		Tools    *int            `json:"tools"`
 		Active   json.RawMessage `json:"active"`
 	}
-	if json.Unmarshal(body, &shape) != nil || shape.Object != "concurrency" || !jsonArray(shape.Data) || !jsonArray(shape.Active) || shape.Requests == nil || shape.Waiting == nil || shape.Tools == nil || *shape.Requests < 0 || *shape.Waiting < 0 || *shape.Tools < 0 {
+	if json.Unmarshal(body, &shape) != nil || shape.Object != "concurrency" || !jsonObjectOrArray(shape.Data) || !jsonArray(shape.Active) || shape.Requests == nil || shape.Waiting == nil || shape.Tools == nil || *shape.Requests < 0 || *shape.Waiting < 0 || *shape.Tools < 0 {
 		result.Code = "health_response_invalid"
 		return result
 	}
@@ -79,4 +79,12 @@ func (c *Client) probeHealth(ctx context.Context, s ClientStatus) HealthResult {
 func jsonArray(raw json.RawMessage) bool {
 	raw = bytes.TrimSpace(raw)
 	return len(raw) > 0 && raw[0] == '['
+}
+
+// jsonObjectOrArray takes the lanes /v1/magpie/concurrency sends (a map keyed
+// by lane) and the array an older server sent: the probe only needs to know
+// the field is there and is a JSON container, never what it holds.
+func jsonObjectOrArray(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) > 0 && (raw[0] == '[' || raw[0] == '{')
 }
