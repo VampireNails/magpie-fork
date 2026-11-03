@@ -26,11 +26,21 @@ func connectionPath() string { return filepath.Join(appdir.Config(), "remote-con
 var connectionStorage = filelock.Mutex{Path: func() string { return connectionPath() + ".lock" }}
 
 func withConnection(fn func(*connectionFile) (bool, error)) error {
+	return withConnectionContext(context.Background(), fn)
+}
+
+func withConnectionContext(ctx context.Context, fn func(*connectionFile) (bool, error)) error {
 	path := connectionPath()
-	if err := connectionStorage.LockContext(context.Background(), 10*time.Second); err != nil {
+	if err := connectionStorage.LockContext(ctx, 10*time.Second); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return errors.New("connection storage lock unavailable")
 	}
 	defer connectionStorage.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var f connectionFile
 	data, err := steady.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -81,12 +91,18 @@ func withConnection(fn func(*connectionFile) (bool, error)) error {
 	if err != nil || !changed {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	data, err = json.MarshalIndent(f, "", "  ")
 	if err != nil {
 		return errors.New("connection storage encoding failed")
 	}
 	if err = os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return errors.New("connection storage unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err = steady.WriteFile(path, append(data, '\n'), 0600); err != nil {
 		return errors.New("connection storage write failed")
