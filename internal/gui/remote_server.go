@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,17 +33,37 @@ func remoteWebHandler(origin string, session webSession, resolver remotejoin.Pee
 	}
 	native := onePort(gateway.AllowGuard(webCompressed(session.guard(page))))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		// Tailscale Serve's Unix backend uses localhost as Host and replaces
+		// X-Forwarded-Host with the incoming authority. This header is only a
+		// value to compare, never identity; the resolver still requires the
+		// protected connection and performs a local whois lookup.
+		if host == "localhost" {
+			hosts := r.Header.Values("X-Forwarded-Host")
+			protos := r.Header.Values("X-Forwarded-Proto")
+			if len(hosts) != 1 || len(protos) != 1 || protos[0] != "https" || strings.ContainsAny(hosts[0], "/\\?#") {
+				http.Error(w, "invalid server host", http.StatusBadRequest)
+				return
+			}
+			host = hosts[0]
+		}
+		got, err := remotejoin.RootOrigin("https://" + host)
+		if err != nil || got != origin {
+			http.Error(w, "invalid server host", http.StatusBadRequest)
+			return
+		}
+		// Downstream same-origin guards must see the configured public URL,
+		// not the Unix proxy's localhost and plaintext transport.
+		r = r.Clone(r.Context())
+		public, _ := url.Parse(origin)
+		r.Host = public.Host
+		r.URL.Scheme = public.Scheme
 		if r.URL.Path != remotejoin.BrowserLoginPath && r.URL.Path != remotejoin.RegistrationPath {
 			native.ServeHTTP(w, r)
 			return
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		got, err := remotejoin.RootOrigin("https://" + r.Host)
-		if err != nil || got != origin {
-			http.Error(w, "invalid server host", http.StatusBadRequest)
-			return
-		}
 		if r.URL.Path == remotejoin.RegistrationPath {
 			registration.ServeHTTP(w, r)
 			return

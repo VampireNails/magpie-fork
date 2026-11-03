@@ -10,6 +10,7 @@ let gatewayKeysRead = 0;
 // gatewayKeysErr is why the list couldn't be read, said in its place until
 // a read works: a redraw of the page (the providers' poll) keeps it
 let gatewayKeysErr = "";
+let remoteDevices = null, remoteDevicesError = false, remoteDevicesRead = 0;
 // gatewayLimit is the key whose limit editor is open, and its draft
 // (#585): what is picked in it is sent only by its Save.
 let gatewayLimit = null;
@@ -55,6 +56,7 @@ async function selectConnectKey(id) {
   } catch (e) { status(t(e.message), "err"); }
 }
 async function loadGatewayKeys() {
+  loadRemoteDevices();
   const read = ++gatewayKeysRead;
   try {
     const out = await api("caller-keys");
@@ -206,6 +208,7 @@ function renderGatewayKeys() {
   const box = $("#gatewayKeys");
   $("#gatewayKeysBlock").hidden = !providers?.gateway.lan;
   box.replaceChildren();
+  renderRemoteDevices();
   $("#addGatewayKey").onclick = () => { gatewayKeyDraft = ""; renderGatewayKeys(); };
   // keys: a badge left unset folds away until the row is pointed at, as
   // on a provider's keys, so nothing invisible holds a place in the row
@@ -237,6 +240,56 @@ function renderGatewayKeys() {
   gatewayKeysArrange(list, rows);
   const page = gatewayKeyPage();
   if (page) box.append(page);
+}
+
+async function loadRemoteDevices() {
+  const read = ++remoteDevicesRead, items = [];
+  let cursor = "";
+  try {
+    do {
+      const page = await api("remote-devices?limit=100" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""));
+      items.push(...page.items);
+      cursor = page.nextCursor || "";
+    } while (cursor);
+    if (read !== remoteDevicesRead) return;
+    remoteDevices = items;
+    remoteDevicesError = false;
+  } catch {
+    if (read !== remoteDevicesRead) return;
+    remoteDevicesError = true;
+  }
+  renderGatewayKeys();
+}
+
+function renderRemoteDevices() {
+  $("#remoteDevices")?.remove();
+  const section = el("div", "remote-devices");
+  section.id = "remoteDevices";
+  section.append(el("h3", "", t("Remote devices")));
+  section.append(el("p", "usage-note", t("Last registration is not an online status.")));
+  if (remoteDevicesError) section.append(el("div", "none", t("Could not load remote devices.")));
+  else if (remoteDevices === null) section.append(el("div", "none", t("Loading remote devices…")));
+  else if (!remoteDevices.length) section.append(el("div", "none", t("No remote devices yet")));
+  else for (const d of remoteDevices) {
+    const row = el("div", "acc");
+    row.dataset.device = d.id;
+    const detail = el("div", "");
+    detail.append(el("b", "", d.displayName), el("div", "usage-note", t("Node ID: {id}", { id: d.nodeId })),
+      el("div", "usage-note", t("Last registration: {time}", { time: new Date(d.lastSeenAt).toLocaleString() })));
+    const remove = el("button", "text", t("Remove device"));
+    remove.onclick = async () => {
+      if (!(await confirmAction(t("Remove remote device?"), t("The device can register again when it reconnects."), t("Remove")))) return;
+      remove.disabled = true;
+      try {
+        const res = await fetch("/api/remote-devices/" + encodeURIComponent(d.id), { method: "DELETE" });
+        if (!res.ok) throw new Error();
+        await loadGatewayKeys();
+      } catch { status(t("Could not remove remote device."), "err"); remove.disabled = false; }
+    };
+    row.append(detail, el("span", "grow"), remove);
+    section.append(row);
+  }
+  $("#gatewayKeysBlock").after(section);
 }
 
 // gatewayKeysArrange: the keys are listed in the order the user puts them
