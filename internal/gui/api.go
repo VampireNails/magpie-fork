@@ -956,6 +956,10 @@ func versionedPage(page []byte) []byte {
 // gw is the gateway this process serves, or nil when another magpie has it
 // (for now: see startBackend).
 func Handler(w Windows, gw *gateway.Server) http.Handler {
+	return pageHandler(w, gw, false)
+}
+
+func pageHandler(w Windows, gw *gateway.Server, remoteClient bool) http.Handler {
 	if gw != nil {
 		served.Store(gw)
 	}
@@ -975,6 +979,9 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		// and the text size, which the Mac's header measures against the
 		// traffic lights
 		boot := map[string]any{"lang": s.Lang, "theme": s.Theme, "textSize": s.TextSize, "web": isWeb(w)}
+		if remoteClient {
+			boot["remoteClient"] = true
+		}
 		if s.Colorblind {
 			boot["colorblind"] = true
 		}

@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/yetone/magpie/internal/gateway"
 )
 
 // remoteClientStatus contains only information safe for the desktop page.
@@ -185,4 +187,9 @@ func remoteSameOrigin(r *http.Request) bool {
 		}
 	}
 	return true
+}
+
+// desktopRemoteHandler binds the local control routes and boot flag together.
+func desktopRemoteHandler(w Windows, gw *gateway.Server, service remoteClientService) http.Handler {
+	return localRemoteHandler(pageHandler(w, gw, true), service)
 }

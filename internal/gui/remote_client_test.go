@@ -144,3 +144,20 @@ func TestRemoteClientEmptyObjectCallsConnect(t *testing.T) {
 		t.Fatalf("status %d calls %d", w.Code, f.calls)
 	}
 }
+
+func TestRemoteClientBootFlagOnlyForDesktop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		h    http.Handler
+		want bool
+	}{{"desktop", desktopRemoteHandler(nil, nil, remoteFixture{}), true}, {"server", Handler(nil, nil), false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tc.h.ServeHTTP(w, httptest.NewRequest("GET", "/boot.js", nil))
+			got := strings.Contains(w.Body.String(), `"remoteClient":true`)
+			if w.Code != 200 || got != tc.want {
+				t.Fatalf("boot flag got %v, status %d", got, w.Code)
+			}
+		})
+	}
+}
