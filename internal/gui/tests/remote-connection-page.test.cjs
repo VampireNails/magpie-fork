@@ -55,3 +55,45 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     }
   });
 }
+
+for (const action of ["connect", "disconnect"]) test("navigation keeps pending " + action + " locked and discards old reads", async t => {
+  const browser = await (process.env.BROWSER === "webkit" ? webkit : chromium).launch(); t.after(() => browser.close());
+  const page = await browser.newPage(); page.setDefaultNavigationTimeout(60000);
+  let reads = 0, posts = 0, releasePost, releaseOldRead;
+  const heldPost = new Promise(r => releasePost = r), heldRead = new Promise(r => releaseOldRead = r);
+  const state = (name, address) => ({state:name,serverUrl:address,owner:true,connected:true,lastSyncAt:null,errorCode:'',recoveryTarget:''});
+  await page.route('**/*', async route => {
+    const req = route.request(), u = new URL(req.url()), json = data => route.fulfill({json:data});
+    if (u.pathname === '/boot.js') return route.fulfill({contentType:'text/javascript',body:'window.bootPrefs={lang:"en",theme:"light",remoteClient:true}'});
+    if (u.pathname === '/wails/runtime.js') return route.fulfill({contentType:'text/javascript',body:'export const Window = {}'});
+    if (u.pathname === '/api/remote-connection' || u.pathname === '/api/remote-connection/disconnect') {
+      if (req.method() === 'POST') { posts++; await heldPost; return json(state('paused','https://new.example')); }
+      reads++; if (reads === 3) { await heldRead; return json(state('connected','https://old.example')); }
+      return json(state('connected','https://initial.example'));
+    }
+    if (u.pathname === '/api/state') return json({agents:[],profiles:[],settings:{lang:'en',theme:'light'}});
+    if (u.pathname === '/api/settings') return json({lang:'en',theme:'light'});
+    if (u.pathname === '/api/plugins') return json({plugins:[]});
+    if (u.pathname === '/api/groups') return json({groups:[],models:[]});
+    if (u.pathname.startsWith('/api/')) return json({});
+    const f=path.join(assets,u.pathname === '/' ? 'index.html' : u.pathname);
+    try { return await route.fulfill({body:await fs.readFile(f),contentType:({'.html':'text/html','.js':'text/javascript','.css':'text/css'})[path.extname(f)]}); } catch { return route.fulfill({status:404,body:''}); }
+  });
+  await page.goto('http://localhost:3430/');
+  const nav=page.locator('#nav button[data-view="remote-connection"]'), agents=page.locator('#nav button[data-view="agents"]');
+  await nav.click(); await page.waitForFunction(() => document.querySelector('#remoteCurrent').textContent.includes('initial'));
+  await page.locator(action === 'connect' ? '#remoteConnect' : '#remoteDisconnect').click(); await page.waitForFunction(() => document.querySelector('#remoteDisconnect').disabled);
+  await agents.click(); await nav.click();
+  await page.waitForFunction(() => document.querySelector("#remoteCurrent").textContent.includes("initial"));
+  await page.waitForTimeout(500);
+  assert.equal(await page.locator('#remoteDisconnect').isDisabled(), true, 'pending operation remains locked');
+  await page.locator(action === "connect" ? "#remoteConnect" : "#remoteDisconnect").evaluate(button => button.click());
+  assert.equal(posts, 1);
+  await agents.click(); await nav.click();
+  while (reads < 3) await page.waitForTimeout(20);
+  releasePost();
+  await page.waitForFunction(() => document.querySelector('#remoteCurrent').textContent.includes('new.example'));
+  releaseOldRead(); await page.waitForTimeout(500);
+  assert((await page.locator('#remoteCurrent').textContent()).includes('new.example'), 'old read must not replace the result');
+  await agents.click(); const before=reads; await page.waitForTimeout(10500); assert.equal(reads,before,'leaving clears the timer');
+});

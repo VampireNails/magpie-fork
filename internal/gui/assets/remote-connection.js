@@ -44,7 +44,7 @@ if (window.bootPrefs?.remoteClient === true) {
   nav.innerHTML = '<span data-t>Remote connection: Server</span>';
   document.querySelector('#nav button[data-view="agents"]').after(nav);
   magpie.plugin("remote-connection", ctx => {
-    let page, status = null, busy = false, notice = "", timer = null, active = false;
+    let page, status = null, busy = false, reading = false, notice = "", timer = null, active = false, generation = 0, revision = 0;
     const words = {
       unconfigured: "Remote connection: Not configured", connecting: "Remote connection: Connecting", connected: "Remote connection: Connected",
       retrying: "Remote connection: Reconnecting", restoring: "Remote connection: Restoring", "offline-detached": "Remote connection: Offline, local connections restored",
@@ -60,19 +60,27 @@ if (window.bootPrefs?.remoteClient === true) {
       const detail = notice || (status?.errorCode ? message(status.errorCode) : "");
       q("remoteNotice").textContent = detail && detail !== words[status?.state] ? say(detail) : "";
       q("remoteTarget").textContent = status?.state === "restore-failed" && ["workbuddy", "hermes"].includes(status.recoveryTarget) ? status.recoveryTarget : "";
-      page.querySelectorAll("button").forEach(b => { b.disabled = busy; });
-      q("remoteManage").disabled = busy || !status?.serverUrl;
-      q("remoteRefresh").disabled = busy || !status?.serverUrl;
-      q("remoteDisconnect").disabled = busy || !status?.serverUrl;
-      page.setAttribute("aria-busy", String(busy));
+      page.querySelectorAll("button").forEach(b => { b.disabled = busy || reading; });
+      q("remoteManage").disabled = busy || reading || !status?.serverUrl;
+      q("remoteRefresh").disabled = busy || reading || !status?.serverUrl;
+      q("remoteDisconnect").disabled = busy || reading || !status?.serverUrl;
+      page.setAttribute("aria-busy", String(busy || reading));
     }
-    async function read() {
-      try { status = await window.remoteConnection.request("status"); return true; }
-      catch { notice = "Remote connection: Status may be out of date"; return false; }
+    async function read(turn, version) {
+      try {
+        const result = await window.remoteConnection.request("status");
+        if (!active || turn !== generation || version !== revision) return false;
+        status = result;
+        if (notice === "Remote connection: Status may be out of date") notice = "";
+        return true;
+      } catch {
+        if (active && turn === generation && version === revision) notice = "Remote connection: Status may be out of date";
+        return false;
+      }
     }
     async function act(action) {
-      if (busy) return;
-      busy = true; notice = ""; paint();
+      if (busy || reading) return;
+      busy = true; revision++; notice = ""; paint();
       try {
         if (action === "manage") {
           const answer = await window.remoteConnection.request("manage");
@@ -81,10 +89,16 @@ if (window.bootPrefs?.remoteClient === true) {
           await api("open", { url });
         } else {
           status = await window.remoteConnection.request(action, action === "connect" ? page.querySelector("#remoteAddress").value.trim() : "");
-          if (typeof status?.serverUrl === "string") page.querySelector("#remoteAddress").value = status.serverUrl;
+          if (active && typeof status?.serverUrl === "string") page.querySelector("#remoteAddress").value = status.serverUrl;
         }
-      } catch (error) { notice = message(error.code); await read(); }
-      busy = false; paint();
+      } catch (error) {
+        notice = message(error.code);
+        if (active) await read(generation, revision);
+      } finally {
+        revision++;
+        busy = false;
+        if (active) paint();
+      }
     }
     ctx.slots.add("page", {
       key: "remote-connection", title: "Server",
@@ -99,21 +113,23 @@ if (window.bootPrefs?.remoteClient === true) {
       },
       async open() {
         active = true;
-        busy = true; notice = ""; paint();
-        const ok = await read();
-        if (!active) { busy = false; return; }
-        if (ok && typeof status?.serverUrl === "string") page.querySelector("#remoteAddress").value = status.serverUrl;
-        busy = false; paint();
-        clearInterval(timer);
+        const turn = ++generation, version = revision;
+        clearInterval(timer); timer = null;
+        reading = true; paint();
+        const ok = await read(turn, version);
+        if (!active || turn !== generation) return;
+        if (ok && !busy && typeof status?.serverUrl === "string") page.querySelector("#remoteAddress").value = status.serverUrl;
+        reading = false; paint();
         timer = setInterval(async () => {
-          if (busy) return;
-          busy = true;
-          const ok = await read();
-          if (ok && notice === "Remote connection: Status may be out of date") notice = "";
-          busy = false; paint();
+          if (busy || reading) return;
+          const version = revision;
+          reading = true; paint();
+          await read(turn, version);
+          if (!active || turn !== generation) return;
+          reading = false; paint();
         }, 10000);
       },
-      leave() { active = false; clearInterval(timer); timer = null; },
+      leave() { active = false; generation++; reading = false; clearInterval(timer); timer = null; },
     });
   });
 }
