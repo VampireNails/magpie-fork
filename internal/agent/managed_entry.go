@@ -41,6 +41,8 @@ type ManagedEntries struct {
 	store                       *ManagedStore
 	recovered, owner, connected bool
 	slots                       map[string]*managedEntrySlot
+	// disconnectLoaded is an immutable test barrier; production leaves it nil.
+	disconnectLoaded func()
 }
 type managedEntrySlot struct {
 	mu      sync.Mutex
@@ -233,9 +235,19 @@ func managedEntryDisconnect(a *Agent) (bool, error) {
 		return false, nil
 	}
 	m := v.(*ManagedEntries)
+	if m.disconnectLoaded != nil {
+		m.disconnectLoaded()
+	}
+	// Keep Close from unregistering this controller between validation and
+	// restore. The journal is keyed by agent, so it could belong to a new owner.
+	m.lifecycle.Lock()
+	defer m.lifecycle.Unlock()
 	slot := m.slots[a.ID]
 	slot.mu.Lock()
 	defer slot.mu.Unlock()
+	if current, ok := managedOwners.Load(m.key); m.closed || !ok || current != m {
+		return true, ErrManagedStale
+	}
 	adapter, _, err := managedAdapterFor(a)
 	if err == nil {
 		err = m.store.RestoreManaged(a.ID, adapter)
