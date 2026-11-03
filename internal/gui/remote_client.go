@@ -43,12 +43,12 @@ func localRemoteHandler(next http.Handler, service remoteClientService) http.Han
 	})
 	mux.HandleFunc("POST /api/remote-connection", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
-			ServerURL string `json:"serverUrl"`
+			ServerURL remoteOptionalString `json:"serverUrl"`
 		}
 		if !remoteBody(w, r, &in) {
 			return
 		}
-		s, err := service.Connect(r.Context(), in.ServerURL)
+		s, err := service.Connect(r.Context(), string(in.ServerURL))
 		remoteStatus(w, s, err)
 	})
 	for _, action := range []string{"refresh", "disconnect", "manage"} {
@@ -192,4 +192,19 @@ func remoteSameOrigin(r *http.Request) bool {
 // desktopRemoteHandler binds the local control routes and boot flag together.
 func desktopRemoteHandler(w Windows, gw *gateway.Server, service remoteClientService) http.Handler {
 	return localRemoteHandler(pageHandler(w, gw, true), service)
+}
+
+// remoteOptionalString accepts an absent field or a JSON string, never null.
+type remoteOptionalString string
+
+func (s *remoteOptionalString) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || data[0] != '"' {
+		return errors.New("string required")
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*s = remoteOptionalString(value)
+	return nil
 }

@@ -161,3 +161,23 @@ func TestRemoteClientBootFlagOnlyForDesktop(t *testing.T) {
 		})
 	}
 }
+func TestRemoteClientRejectsNullServerURLWithoutServiceCall(t *testing.T) {
+	for _, body := range []string{`{"serverUrl":null}`, `{"serverUrl":42}`, `{"serverUrl":false}`, `{"serverUrl":[]}`} {
+		f := &countingRemoteFixture{}
+		w := httptest.NewRecorder()
+		localRemoteHandler(http.NotFoundHandler(), f).ServeHTTP(w, httptest.NewRequest("POST", "/api/remote-connection", strings.NewReader(body)))
+		if w.Code != 400 || f.calls != 0 {
+			t.Errorf("%s: status %d calls %d", body, w.Code, f.calls)
+		}
+	}
+}
+func TestRemoteClientAcceptsEmptyServerURL(t *testing.T) {
+	for _, body := range []string{`{}`, `{"serverUrl":""}`} {
+		f := &countingRemoteFixture{}
+		w := httptest.NewRecorder()
+		localRemoteHandler(http.NotFoundHandler(), f).ServeHTTP(w, httptest.NewRequest("POST", "/api/remote-connection", strings.NewReader(body)))
+		if w.Code != 200 || f.calls != 1 {
+			t.Errorf("%s: status %d calls %d", body, w.Code, f.calls)
+		}
+	}
+}
