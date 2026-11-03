@@ -356,3 +356,7 @@ reenter a public managed method, or retain the scoped object. Integration must
 stop and drain native sync before restore and use an internal non-reentrant
 cleanup implementation; calling a lock-taking `Disconnect` inside the callback
 can deadlock. Store locks do not yet guard native public entry points.
+
+## Remote client guard (interim)
+
+When a remote connection file or an agent journal is present, `Apply`, `Pick` and `ConnectHow` reject WorkBuddy and Hermes without a resident owner, and `SyncCatalog` skips them. This conservative guard does not implement managed recovery or owner IPC. Other automatic writers and disconnect are not yet guarded; this interim change is not a complete remote-client integration. See [`managed_entry.go`](../../internal/agent/managed_entry.go).
