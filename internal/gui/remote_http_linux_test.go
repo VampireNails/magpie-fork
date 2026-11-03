@@ -27,7 +27,7 @@ func TestRemoteServerLinuxDenialsAndProxyFailuresDoNotDiscloseRequest(t *testing
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(previous) })
 	session := webSession{cookie: "magpie_web_19443", key: "fake-admin-0123456789", keep: webCookieAge, secure: true}
-	h, err := remoteWebHandler("https://server.example:19443", session, remotejoin.NewLocalAPIResolver(http.DefaultClient, time.Second), Handler(webHost{func() {}}, nil))
+	h, err := remoteWebHandler("https://fake-host-secret.example:19443", session, remotejoin.NewLocalAPIResolver(http.DefaultClient, time.Second), Handler(webHost{func() {}}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,10 +45,10 @@ func TestRemoteServerLinuxDenialsAndProxyFailuresDoNotDiscloseRequest(t *testing
 	}}
 	defer tr.CloseIdleConnections()
 	cli := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	check := func(target string, want int) {
+	check := func(target, host string, want int) {
 		t.Helper()
-		r, _ := http.NewRequest("GET", "http://server.example:19443"+target, nil)
-		r.Host = "fake-host-secret.example"
+		r, _ := http.NewRequest("GET", "http://fake-host-secret.example:19443"+target, nil)
+		r.Host = host
 		r.Header.Set("Origin", "https://fake-origin-secret.example")
 		r.Header.Set("Authorization", "Bearer fake-key-secret")
 		r.Header.Set("X-Forwarded-For", "100.75.211.11")
@@ -70,15 +70,16 @@ func TestRemoteServerLinuxDenialsAndProxyFailuresDoNotDiscloseRequest(t *testing
 			}
 		}
 	}
-	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusUnauthorized)
-	check("/api/fake-path-secret?value=fake-query-secret", http.StatusUnauthorized)
+	check("/v1/fake-path-secret?value=fake-query-secret", "fake-host-secret.foreign.invalid", http.StatusBadRequest)
+	check("/v1/fake-path-secret?value=fake-query-secret", "fake-host-secret.example:19443", http.StatusUnauthorized)
+	check("/api/fake-path-secret?value=fake-query-secret", "fake-host-secret.example:19443", http.StatusUnauthorized)
 	t.Setenv("MAGPIE_ALLOW_IPS", "192.0.2.0/24")
-	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusForbidden)
-	check("/api/fake-path-secret?value=fake-query-secret", http.StatusForbidden)
+	check("/v1/fake-path-secret?value=fake-query-secret", "fake-host-secret.example:19443", http.StatusForbidden)
+	check("/api/fake-path-secret?value=fake-query-secret", "fake-host-secret.example:19443", http.StatusForbidden)
 	t.Setenv("MAGPIE_ALLOW_IPS", "")
 	served.Store(nil)
 	t.Setenv("MAGPIE_ADDR", "127.0.0.1:1")
-	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusBadGateway)
+	check("/v1/fake-path-secret?value=fake-query-secret", "fake-host-secret.example:19443", http.StatusBadGateway)
 }
 
 func TestRemoteServerLinuxAuthenticatedCORSDoesNotDiscloseRequest(t *testing.T) {
@@ -91,7 +92,7 @@ func TestRemoteServerLinuxAuthenticatedCORSDoesNotDiscloseRequest(t *testing.T) 
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(previous) })
 	session := webSession{cookie: "magpie_web_19443", key: "fake-admin-0123456789", keep: webCookieAge, secure: true}
-	h, err := remoteWebHandler("https://server.example:19443", session, remotejoin.NewLocalAPIResolver(http.DefaultClient, time.Second), Handler(webHost{func() {}}, nil))
+	h, err := remoteWebHandler("https://fake-host-secret.example:19443", session, remotejoin.NewLocalAPIResolver(http.DefaultClient, time.Second), Handler(webHost{func() {}}, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,8 +112,8 @@ func TestRemoteServerLinuxAuthenticatedCORSDoesNotDiscloseRequest(t *testing.T) 
 	cli := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	check := func(target string, want int) {
 		t.Helper()
-		r, _ := http.NewRequest("GET", "http://server.example:19443"+target, nil)
-		r.Host = "fake-host-secret.example"
+		r, _ := http.NewRequest("GET", "http://fake-host-secret.example:19443"+target, nil)
+		r.Host = "fake-host-secret.example:19443"
 		r.Header.Set("Origin", "https://fake-origin-secret.example")
 		r.Header.Set("Authorization", "Bearer "+key)
 		r.Header.Set("X-Forwarded-For", "100.75.211.11")
@@ -135,8 +136,8 @@ func TestRemoteServerLinuxAuthenticatedCORSDoesNotDiscloseRequest(t *testing.T) 
 		}
 	}
 	check("/v1/fake-path-secret?value=fake-query-secret", http.StatusForbidden)
-	for _, origin := range []string{"null", "http://server.example:19443"} {
-		r, _ := http.NewRequest("GET", "http://server.example:19443/v1/models", nil)
+	for _, origin := range []string{"null", "http://fake-host-secret.example:19443"} {
+		r, _ := http.NewRequest("GET", "http://fake-host-secret.example:19443/v1/models", nil)
 		r.Header.Set("Origin", origin)
 		r.Header.Set("Authorization", "Bearer "+key)
 		r.Header.Set("X-Forwarded-For", "100.75.211.11")

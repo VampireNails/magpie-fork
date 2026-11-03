@@ -916,3 +916,15 @@ The socket directory is created with mode 0700 and the socket 0600, owned by the
 The listener passes registration and browser-login through the `remotejoin` verified peer resolver, using the local tailscaled Unix LocalAPI. Only this listener marks connections trusted. The browser bridge issues the same native Web cookie, keyed by the explicit external HTTPS port, with HttpOnly, SameSite=Lax and Secure; it returns a clean same-site path. The rest of the site continues through native Handler, onePort, gateway Front and their guards. Gateway requests still require an enabled gateway key, independently of the Web cookie. Fixed-key rotation takes effect after restarting the service; open the clean browser-login URL again to replace an old or cleared cookie. `MAGPIE_WEB_KEY` and the socket are host credentials; the normal startup output does not print the key.
 
 Subscription OAuth follows the existing provider or plugin flow, including its native callback or manual callback route. Remote browser, WebView and subscription OAuth compatibility require real validation; the socket tests use simulated LocalAPI whois and do not establish real Tailscale identity or complete management acceptance.
+
+### Tailscale Serve Unix listener
+
+`StartRemoteWeb` serves the native page and bootstrap routes on a protected
+Unix socket. Tailscale Serve 1.102.4 forwards the original authority in a
+single `X-Forwarded-Host` and sends `Host: localhost` to this backend. The
+listener compares that authority and HTTPS forwarding scheme to its fixed
+public origin before passing a request to the existing guards. It supplies the
+fixed public host and HTTPS scheme to downstream same-origin checks. Forwarded
+headers do not establish peer identity: bootstrap still requires the protected
+connection and local Tailscale whois. The socket must remain inaccessible to
+untrusted local users. Ordinary TCP listeners do not install this handler.

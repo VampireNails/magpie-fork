@@ -1346,6 +1346,7 @@ func pageHandler(w Windows, gw *gateway.Server, remoteClient bool) http.Handler 
 	importRoutes(mux)
 	usageRoutes(mux, w)
 	callerKeyRoutes(mux)
+	remoteDeviceRoutes(mux)
 	sessionRoutes(mux, w)
 	sessionManageRoutes(mux, w)
 	backupRoutes(mux, w)
