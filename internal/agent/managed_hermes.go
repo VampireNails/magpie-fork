@@ -276,31 +276,28 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 			return err
 		}
 		var out strings.Builder
-		inserted := false
-		appendOriginal := func() {
-			for i, saved := range original {
-				out.WriteString(saved)
-				if !strings.HasSuffix(saved, "\n") && (i+1 < len(original) || len(records) > 1) {
-					out.WriteByte('\n')
-				}
-			}
-		}
+		count := 0
 		for _, record := range records {
 			if record.key == t.Scope {
-				if !inserted {
-					appendOriginal()
-					inserted = true
-				}
+				count++
+			}
+		}
+		if s.Exists && count != len(original) {
+			return ErrManagedRestore
+		}
+		n := 0
+		for i, record := range records {
+			if record.key != t.Scope {
+				out.WriteString(record.text)
 				continue
 			}
-			out.WriteString(record.text)
-		}
-		if !inserted && len(original) > 0 {
-			if out.Len() > 0 && !strings.HasSuffix(out.String(), "\n") {
-				out.WriteByte('\n')
-			}
-			for _, saved := range original {
+			if s.Exists {
+				saved := original[n]
+				n++
 				out.WriteString(saved)
+				if !strings.HasSuffix(saved, "\n") && i+1 < len(records) && records[i+1].text != "" {
+					out.WriteByte('\n')
+				}
 			}
 		}
 		return edit.WriteAtomic(t.Path, []byte(out.String()))
@@ -683,14 +680,42 @@ func hermesManagedSetEnv(path, name, value string) error {
 	if err != nil {
 		return err
 	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".env-value-*")
+	if err != nil {
+		return err
+	}
+	temp := tmp.Name()
+	defer os.Remove(temp)
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := edit.SetEnvFile(temp, edit.KV{Path: name, Value: value}); err != nil {
+		return err
+	}
+	encoded, err := os.ReadFile(temp)
+	if err != nil {
+		return err
+	}
+	line := strings.TrimSuffix(string(encoded), "\n")
 	var out strings.Builder
+	count := 0
 	for _, r := range records {
 		if r.key != name {
 			out.WriteString(r.text)
+			continue
+		}
+		count++
+		out.WriteString(line)
+		if strings.HasSuffix(r.text, "\n") {
+			out.WriteByte('\n')
 		}
 	}
-	if err := os.WriteFile(path, []byte(out.String()), 0600); err != nil {
-		return err
+	if count == 0 {
+		if out.Len() > 0 && !strings.HasSuffix(out.String(), "\n") {
+			out.WriteByte('\n')
+		}
+		out.WriteString(line)
+		out.WriteByte('\n')
 	}
-	return edit.SetEnvFile(path, edit.KV{Path: name, Value: value})
+	return os.WriteFile(path, []byte(out.String()), 0600)
 }

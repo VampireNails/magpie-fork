@@ -310,6 +310,70 @@ func TestManagedHermesApplyHardlinksLeaveOtherPaths(t *testing.T) {
 			t.Error("managed apply changed another hardlink")
 		}
 	}
+	// The user replaces each target with another hardlink after joining.
+	for _, p := range []string{config, env} {
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		text := cfg
+		if p == env {
+			text = "MY_KEY=fixture-later # note\n"
+		}
+		other := p + ".replacement"
+		if err := os.WriteFile(other, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(other, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := session.BeforeManagedWrite(func(w *ManagedWrite) error {
+		return WithManagedHermes(w, home, func(a *Agent) error { return a.Sync() })
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{config, env} {
+		b, err := os.ReadFile(p + ".replacement")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := cfg
+		if p == env {
+			expected = "MY_KEY=fixture-later # note\n"
+		}
+		if string(b) != expected {
+			t.Error("sync changed another hardlink")
+		}
+	}
+	if got, _ := edit.GetYAML(config, "providers.magpie.api_key"); got != "${MY_KEY}" {
+		t.Error("sync did not preserve reference")
+	}
+	if got, _ := edit.GetEnvFile(env, "MY_KEY"); got == "fixture-later" {
+		t.Error("sync did not update referenced variable")
+	}
+	if err := store.RestoreManaged("hermes", a); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{config, env} {
+		b, err := os.ReadFile(p + ".replacement")
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected := cfg
+		if p == env {
+			expected = "MY_KEY=fixture-later # note\n"
+		}
+		if string(b) != expected {
+			t.Error("restore changed another hardlink")
+		}
+	}
+
+	if got, _ := edit.GetEnvFile(env, "MY_KEY"); got != "fixture-original" {
+		t.Error("baseline env value not restored")
+	}
+	if got, _ := edit.GetYAML(config, "model.default"); got != "own" {
+		t.Error("baseline model not restored")
+	}
 }
 
 func TestManagedHermesEnvAssignmentVariants(t *testing.T) {
@@ -344,5 +408,78 @@ func TestManagedHermesEnvAssignmentVariants(t *testing.T) {
 		if v, _ := edit.GetEnvFile(path, "OTHER"); v != "later" {
 			t.Error("other variable changed")
 		}
+	}
+}
+
+func TestManagedHermesEnvSeparatedAssignmentsKeepOrder(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".env")
+	initial := "# first note\nMY_KEY=one # first\n# middle note\nOTHER=${MY_KEY}\nMY_KEY=two # last"
+	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := HermesManagedAdapter(root)
+	target := hermesManagedTarget(path, "MY_KEY")
+	snap, err := a.Capture(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hermesManagedSetEnv(path, "MY_KEY", "fixture"); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetEnvFile(path, edit.KV{Path: "OTHER", Value: "later"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Restore(target, snap); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# first note\nMY_KEY=one # first\n# middle note\nOTHER=later\nMY_KEY=two # last"
+	if string(got) != want {
+		t.Error("separated assignments or unrelated edit lost their order")
+	}
+}
+
+func TestManagedHermesEnvPositionConflictRetries(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, ".env")
+	initial := "MY_KEY=one\nOTHER=keep\nMY_KEY=two\n"
+	if err := os.WriteFile(path, []byte(initial), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a := HermesManagedAdapter(root)
+	store, err := NewManagedStore(filepath.Join(t.TempDir(), "journal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := hermesManagedTarget(path, "MY_KEY")
+	session, err := store.BeginManaged("hermes", a, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.BeforeManagedWrite(func(w *ManagedWrite) error { return hermesManagedSetEnv(path, "MY_KEY", "fixture") }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("MY_KEY=fixture\nOTHER=keep\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RestoreManaged("hermes", a); err == nil {
+		t.Fatal("expected retryable position conflict")
+	}
+	if err := os.WriteFile(path, []byte("MY_KEY=fixture\nOTHER=later\nMY_KEY=fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RestoreManaged("hermes", a); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "MY_KEY=one\nOTHER=later\nMY_KEY=two\n" {
+		t.Error("retry did not restore assignments in order")
 	}
 }
