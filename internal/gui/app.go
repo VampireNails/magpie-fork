@@ -3,6 +3,7 @@
 package gui
 
 import (
+	"context"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -22,7 +23,6 @@ import (
 	"github.com/yetone/magpie/internal/agent"
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/autostart"
-	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/library"
 	"github.com/yetone/magpie/internal/omarchy"
 	"github.com/yetone/magpie/internal/proc"
@@ -72,10 +72,11 @@ func appIconFor() []byte {
 }
 
 type host struct {
-	app   *application.App
-	panel *application.WebviewWindow
-	main  *application.WebviewWindow
-	tray  *application.SystemTray
+	remoteQuit *desktopQuitGate
+	app        *application.App
+	panel      *application.WebviewWindow
+	main       *application.WebviewWindow
+	tray       *application.SystemTray
 	// flapping is set while the tray bird plays its flap, so a second
 	// click in it doesn't start another over it
 	flapping atomic.Bool
@@ -389,10 +390,36 @@ func Run(version string, showMain bool, link string) error {
 	go stats.Run(version, "app")
 	handler := devShell(h)
 	ownPage := handler == nil
-	var gw *gateway.Server
 	if ownPage {
-		gw = startBackend()
-		handler = Handler(h, gw)
+		runner := newDesktopRunner()
+		life := startDesktopRemote(runner)
+		service := desktopRunnerService{runner: runner}
+		handler = desktopRemoteHandler(h, nil, service)
+		var startupMu sync.Mutex
+		stopping := false
+		stop := func(ctx context.Context) error {
+			startupMu.Lock()
+			stopping = true
+			startupMu.Unlock()
+			return stopDesktopRunner(ctx, life, runner)
+		}
+		h.remoteQuit = newDesktopQuitGate(stop, stop, func() { h.app.Quit() }, func() { h.ShowMain("remote-connection") })
+		go func() {
+			if err := life.waitReady(context.Background()); err != nil {
+				h.whenReady(func() { h.ShowMain("remote-connection") })
+				return
+			}
+			startupMu.Lock()
+			if stopping {
+				startupMu.Unlock()
+				return
+			}
+			gw := startBackend()
+			startAppPage(h, gw)
+			startupMu.Unlock()
+			<-life.done
+			stopServing()
+		}()
 	}
 	// Linux: the magpie before holds the app's D-Bus name until it quits,
 	// once it has finished its requests; this one serves the gateway
@@ -408,6 +435,7 @@ func Run(version string, showMain bool, link string) error {
 		// second launch); it hands its arguments to the running one and quits.
 		// The Mac sends the link to the running app itself.
 		SingleInstance: singleInstance(h),
+		ShouldQuit:     func() bool { return shouldQuitDesktop(h.remoteQuit) },
 		Name:           "magpie",
 		Description:    "one place to pick every agent's model",
 		Icon:           appIconFor(),
@@ -687,9 +715,6 @@ func Run(version string, showMain bool, link string) error {
 	// width (#1371); give it one before the first webview is made.
 	fontDPI()
 	// the page to a browser too, where Settings says (apppage.go)
-	if ownPage {
-		startAppPage(h, gw)
-	}
 	return h.app.Run()
 }
 

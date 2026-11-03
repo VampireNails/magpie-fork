@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 // desktopRunner reports readiness only after recovery and returns from Run after cleanup.
@@ -59,4 +60,60 @@ func (l *desktopRemoteLifecycle) shutdown(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// desktopQuitGate cancels an ordinary quit while recovery runs off the UI thread.
+type desktopQuitGate struct {
+	mu                          sync.Mutex
+	running, allowed, attempted bool
+	stop, retry                 func(context.Context) error
+	done, failed                func()
+}
+
+func newDesktopQuitGate(stop func(context.Context) error, retry func(context.Context) error, done func(), failed func()) *desktopQuitGate {
+	return &desktopQuitGate{stop: stop, retry: retry, done: done, failed: failed}
+}
+func (g *desktopQuitGate) shouldQuit() bool {
+	g.mu.Lock()
+	if g.allowed {
+		g.mu.Unlock()
+		return true
+	}
+	if g.running {
+		g.mu.Unlock()
+		return false
+	}
+	g.running = true
+	attempt := g.stop
+	if g.attempted {
+		attempt = g.retry
+	}
+	g.attempted = true
+	g.mu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := attempt(ctx)
+		if err != nil {
+			g.failed()
+			g.mu.Lock()
+			g.running = false
+			g.mu.Unlock()
+			return
+		}
+		g.mu.Lock()
+		g.running = false
+		g.allowed = true
+		g.mu.Unlock()
+		g.done()
+	}()
+	return false
+}
+
+// shouldQuitDesktop preserves ordinary local behavior when no runner is installed.
+func shouldQuitDesktop(g *desktopQuitGate) bool {
+	if g == nil {
+		return true
+	}
+	return g.shouldQuit()
 }
