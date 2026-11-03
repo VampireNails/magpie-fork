@@ -191,7 +191,16 @@ func remoteSameOrigin(r *http.Request) bool {
 
 // desktopRemoteHandler binds the local control routes and boot flag together.
 func desktopRemoteHandler(w Windows, gw *gateway.Server, service remoteClientService) http.Handler {
-	return localRemoteHandler(pageHandler(w, gw, true), service)
+	next := localRemoteHandler(pageHandler(w, gw, true), service)
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/remote-connection") {
+			if _, ok := r.Context().Value(windowSchemeKey{}).(string); !ok {
+				remoteError(rw, http.StatusForbidden, "UNAVAILABLE")
+				return
+			}
+		}
+		next.ServeHTTP(rw, r)
+	})
 }
 
 // remoteOptionalString accepts an absent field or a JSON string, never null.

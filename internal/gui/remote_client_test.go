@@ -181,3 +181,20 @@ func TestRemoteClientAcceptsEmptyServerURL(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteClientDesktopTransportRequired(t *testing.T) {
+	f := &countingRemoteFixture{}
+	h := desktopRemoteHandler(nil, nil, f)
+	r := httptest.NewRequest("POST", "http://localhost/api/remote-connection", strings.NewReader(`{}`))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 403 || f.calls != 0 {
+		t.Fatalf("untrusted transport status %d calls %d", w.Code, f.calls)
+	}
+	r = httptest.NewRequest("POST", "http://localhost/api/remote-connection", strings.NewReader(`{}`))
+	w = httptest.NewRecorder()
+	ownWindow(h).ServeHTTP(w, r)
+	if w.Code != 200 || f.calls != 1 {
+		t.Fatalf("desktop transport status %d calls %d", w.Code, f.calls)
+	}
+}
