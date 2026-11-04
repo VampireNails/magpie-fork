@@ -474,3 +474,50 @@ func TestGatewayChatRefusalDeltaCredential(t *testing.T) {
 		t.Fatal("chat refusal delta exposed credential or lost protocol reason")
 	}
 }
+
+// A Chat chunk can carry ordinary output and a refusal at the same time. Only
+// the refusal and the error objects are diagnostics; rewriting every string in
+// the chunk corrupted the answer whenever a short credential overlapped normal
+// text ("world" became "w[redacted]ld").
+func TestChatRefusalChunkKeepsOrdinaryContent(t *testing.T) {
+	const secret = "or"
+	input := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"the world is round\"}},{\"index\":1,\"delta\":{\"refusal\":\"blocked by or policy\"},\"finish_reason\":\"content_filter\"}]}\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "the world is round") {
+		t.Errorf("ordinary content was rewritten: %s", out)
+	}
+	if strings.Contains(string(out), "blocked by or policy") {
+		t.Errorf("refusal text still carries the credential: %s", out)
+	}
+	if !strings.Contains(string(out), `"finish_reason":"content_filter"`) {
+		t.Errorf("chat refusal protocol lost its reason: %s", out)
+	}
+}
+
+// The same chunk through the real gateway: the answer must survive intact.
+func TestGatewayChatRefusalChunkKeepsOrdinaryContent(t *testing.T) {
+	fresh(t)
+	const secret = "or"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"the world is round\"}},{\"index\":1,\"delta\":{\"refusal\":\"blocked by or policy\"},\"finish_reason\":\"content_filter\"}]}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if strings.Contains(body, "blocked by or policy") {
+		t.Fatalf("refusal credential exposed: %s", body)
+	}
+	if !strings.Contains(body, "the world is round") {
+		t.Fatalf("ordinary content was rewritten: %s", body)
+	}
+}

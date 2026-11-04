@@ -247,6 +247,72 @@ func hasChatRefusalDelta(event []byte) bool {
 	return false
 }
 
+// A Chat chunk is protocol-shaped: ordinary answers live in choices[].delta
+// while refusals and errors sit in named fields. Only those named fields are
+// diagnostics. Scoping the scrub there keeps an ordinary answer intact when a
+// short credential happens to overlap it ("world" -> "w[redacted]ld"), which
+// rewriting the whole chunk did whenever one choice carried a refusal.
+func chatRefusalPayload(body []byte, secrets []string) ([]byte, bool) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var root map[string]any
+	if dec.Decode(&root) != nil {
+		return body, false
+	}
+	choices, ok := root["choices"].([]any)
+	if !ok {
+		return body, false
+	}
+	changed := false
+	scrub := func(container map[string]any, key string) {
+		value, exists := container[key]
+		if !exists {
+			return
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		clean := hideFailureBody(raw, secrets)
+		if bytes.Equal(raw, clean) {
+			return
+		}
+		next := json.NewDecoder(bytes.NewReader(clean))
+		next.UseNumber()
+		var decoded any
+		if next.Decode(&decoded) != nil {
+			return
+		}
+		container[key] = decoded
+		changed = true
+	}
+	scrub(root, "error")
+	for _, item := range choices {
+		choice, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		scrub(choice, "error")
+		scrub(choice, "refusal")
+		if delta, ok := choice["delta"].(map[string]any); ok {
+			scrub(delta, "error")
+			scrub(delta, "refusal")
+		}
+		if message, ok := choice["message"].(map[string]any); ok {
+			scrub(message, "error")
+			scrub(message, "refusal")
+		}
+	}
+	if !changed {
+		return body, true
+	}
+	out, err := json.Marshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
 // Keep the upstream's known credentials with its body so eventStream can
 // protect errors even when the vendor labels an SSE reply as text/plain.
 type upstreamCredentialBody struct {
@@ -345,7 +411,11 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 						ending = []byte("\n")
 					}
 					payload := bytes.TrimSpace(line[len("data:"):])
-					lines[i] = append(append([]byte("data: "), hideFailureBody(payload, s.secrets)...), ending...)
+					clean, chat := chatRefusalPayload(payload, s.secrets)
+					if !chat {
+						clean = hideFailureBody(payload, s.secrets)
+					}
+					lines[i] = append(append([]byte("data: "), clean...), ending...)
 				} else if colon := bytes.IndexByte(line, ':'); colon >= 0 {
 					if bytes.Equal(line[:colon], []byte("event")) {
 						name := strings.TrimSpace(string(line[colon+1:]))
