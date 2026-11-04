@@ -26,10 +26,18 @@ var managedHermesEnvLine = regexp.MustCompile(`^\s*(?:export\s+)?([A-Za-z_][A-Za
 var managedHermesVar = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type hermesRegion struct {
-	ParentExists bool   `json:"parentExists"`
-	ParentValue  []byte `json:"parentValue"`
-	ParentMap    bool   `json:"parentMap"`
-	Value        []byte `json:"value"`
+	ParentExists    bool   `json:"parentExists"`
+	ParentValue     []byte `json:"parentValue"`
+	ParentAlias     string `json:"parentAlias,omitempty"`
+	ParentAliasHead string `json:"parentAliasHead,omitempty"`
+	ParentAliasLine string `json:"parentAliasLine,omitempty"`
+	ParentAliasFoot string `json:"parentAliasFoot,omitempty"`
+	ParentMap       bool   `json:"parentMap"`
+	Value           []byte `json:"value"`
+	Alias           string `json:"alias,omitempty"`
+	AliasHead       string `json:"aliasHead,omitempty"`
+	AliasLine       string `json:"aliasLine,omitempty"`
+	AliasFoot       string `json:"aliasFoot,omitempty"`
 }
 
 // HermesManagedAdapter owns only Hermes configuration regions under root.
@@ -196,17 +204,37 @@ func hermesManagedCapture(t ManagedTarget) (ManagedSnapshot, error) {
 		r.ParentExists = parent != nil
 		r.ParentMap = parent != nil && parent.Kind == yaml.MappingNode
 		if parent != nil && !r.ParentMap {
+			if parent.Kind == yaml.AliasNode {
+				r.ParentAlias, r.ParentAliasHead, r.ParentAliasLine, r.ParentAliasFoot = parent.Value, parent.HeadComment, parent.LineComment, parent.FootComment
+			}
 			r.ParentValue, err = hermesNodeBytes(parent)
 			if err != nil {
 				return s, err
+			}
+			if parent.Kind != yaml.AliasNode {
+				var check yaml.Node
+				if yaml.Unmarshal(r.ParentValue, &check) != nil {
+					return s, ErrManagedCapture
+				}
 			}
 		}
 	}
 	n := hermesNode(parent, parts[len(parts)-1])
 	s.Exists = n != nil
+	if n != nil && n.Kind == yaml.AliasNode {
+		r.Alias, r.AliasHead, r.AliasLine, r.AliasFoot = n.Value, n.HeadComment, n.LineComment, n.FootComment
+	}
 	r.Value, err = hermesNodeBytes(n)
 	if err != nil {
 		return s, err
+	}
+	// Nested aliases to anchors outside this region cannot be parsed back in
+	// isolation. Refuse the write before losing a recoverable baseline.
+	if n != nil && n.Kind != yaml.AliasNode {
+		var check yaml.Node
+		if err := yaml.Unmarshal(r.Value, &check); err != nil {
+			return s, ErrManagedCapture
+		}
 	}
 	s.Value, err = json.Marshal(r)
 	return s, err
@@ -349,9 +377,15 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 				}
 			}
 		}
+		if r.ParentAlias != "" {
+			return hermesRestoreAlias(t.Path, parts[:1], hermesRegion{Alias: r.ParentAlias, AliasHead: r.ParentAliasHead, AliasLine: r.ParentAliasLine, AliasFoot: r.ParentAliasFoot})
+		}
 		return edit.SetYAML(t.Path, edit.KV{Path: parts[0], Value: edit.YAMLText(r.ParentValue)})
 	}
 	if s.Exists {
+		if r.Alias != "" {
+			return hermesRestoreAlias(t.Path, parts, r)
+		}
 		return edit.SetYAML(t.Path, edit.KV{Path: t.Scope, Value: edit.YAMLText(r.Value)})
 	}
 	if err := edit.DelYAML(t.Path, t.Scope); err != nil {
@@ -372,6 +406,92 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 		}
 	}
 	return nil
+}
+
+// Restore an alias in the document that owns its anchor. Parsing the alias as
+// a standalone YAML value cannot resolve its target. Missing or ambiguous
+// anchors leave the journal pending instead of changing unrelated data.
+func hermesRestoreAlias(path string, parts []string, r hermesRegion) error {
+	raw, exists, _, err := hermesManagedRead(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrManagedRestore
+	}
+	root, err := hermesYAMLRoot(raw)
+	if err != nil {
+		return err
+	}
+	var anchor *yaml.Node
+	count := 0
+	var visit func(*yaml.Node)
+	visit = func(n *yaml.Node) {
+		if n.Anchor == r.Alias {
+			anchor = n
+			count++
+		}
+		for _, child := range n.Content {
+			visit(child)
+		}
+	}
+	visit(root)
+	if count != 1 {
+		return ErrManagedRestore
+	}
+	parent := root
+	for _, part := range parts[:len(parts)-1] {
+		parent = hermesNode(parent, part)
+		if parent == nil || parent.Kind != yaml.MappingNode {
+			return ErrManagedRestore
+		}
+	}
+	key := parts[len(parts)-1]
+	index := -1
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key {
+			index = i + 1
+			break
+		}
+	}
+	var contains func(*yaml.Node) bool
+	contains = func(n *yaml.Node) bool {
+		if n == anchor {
+			return true
+		}
+		for _, child := range n.Content {
+			if contains(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if index >= 0 && contains(parent.Content[index]) {
+		return ErrManagedRestore
+	}
+	alias := &yaml.Node{Kind: yaml.AliasNode, Value: r.Alias, Alias: anchor, HeadComment: r.AliasHead, LineComment: r.AliasLine, FootComment: r.AliasFoot}
+	if index >= 0 {
+		parent.Content[index] = alias
+	} else {
+		parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, alias)
+	}
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err := enc.Encode(root); err != nil {
+		return err
+	}
+	if err := enc.Close(); err != nil {
+		return err
+	}
+	result := out.Bytes()
+	if bytes.Contains(raw, []byte("\r\n")) {
+		result = bytes.ReplaceAll(result, []byte("\n"), []byte("\r\n"))
+	}
+	if _, err := hermesYAMLRoot(result); err != nil {
+		return err
+	}
+	return edit.WriteAtomic(path, result)
 }
 
 func hermesManagedFinalize(f ManagedFileBaseline) error {
