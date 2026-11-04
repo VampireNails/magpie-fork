@@ -207,3 +207,270 @@ func TestLastAttemptHoldsErrorBeforeRelease(t *testing.T) {
 		t.Fatal("last attempt sent an error before credentials could be removed")
 	}
 }
+
+func TestFailureJSONNumericCredential(t *testing.T) {
+	const secret = "123456789"
+	got := hideFailureBody([]byte(`{"error":{"code":123456789,"message":"invalid key"}}`), []string{secret})
+	if bytes.Contains(got, []byte(secret)) || !json.Valid(got) {
+		t.Fatal("numeric credential exposed or JSON invalid")
+	}
+}
+
+func TestFailureEmbeddedShortCredential(t *testing.T) {
+	const secret = "abc123"
+	got := hideFailureBody([]byte(`{"error":{"message":"invalid credential: prefixabc123suffix"}}`), []string{secret})
+	if bytes.Contains(got, []byte(secret)) {
+		t.Fatal("embedded short credential exposed")
+	}
+}
+
+func TestFailureCredentialNotReintroducedByMarker(t *testing.T) {
+	got := hideFailureBody([]byte(`{"error":{"message":"invalid credential: ed"}}`), []string{"ed"})
+	if bytes.Contains(got, []byte("ed")) {
+		t.Fatal("marker reintroduced credential")
+	}
+}
+
+func TestFailureJSONEncodedCredentialAsKey(t *testing.T) {
+	const secret = "synthetic/key-7812"
+	const encoded = "synthetic%2Fkey-7812"
+	got := hideFailureBody([]byte(`{"error":{"synthetic%2Fkey-7812":"failed"}}`), []string{secret})
+	if bytes.Contains(got, []byte(encoded)) || !json.Valid(got) {
+		t.Fatal("encoded credential exposed in JSON property name")
+	}
+}
+
+func TestFailureStreamMetadataCredential(t *testing.T) {
+	const secret = "synthetic-stream-metadata-secret-5832"
+	input := "id: " + secret + "\n: " + secret + "\ndata: {\"error\":{\"message\":\"invalid key\"}}\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil || strings.Contains(string(out), secret) {
+		t.Fatal("stream error metadata exposed credential")
+	}
+}
+
+func TestFailureStreamPlainErrorCredential(t *testing.T) {
+	const secret = "synthetic-plain-stream-secret-7482"
+	input := "event: error\ndata: invalid credential " + secret + "\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil || strings.Contains(string(out), secret) {
+		t.Fatal("plain stream error exposed credential")
+	}
+}
+
+func TestGatewayFailureJSONNumericCredential(t *testing.T) {
+	fresh(t)
+	const secret = "123456789"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":123456789,"message":"invalid credential"}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatal("gateway error exposed numeric provider credential")
+	}
+}
+
+func TestGatewayFailureEmbeddedShortCredential(t *testing.T) {
+	fresh(t)
+	const secret = "abc123"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid credential prefixabc123suffix"}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","messages":[{"role":"user","content":"hello"}]}`))
+	s.Handler().ServeHTTP(rec, req)
+	trace, _ := json.Marshal(s.Trace(context.Background(), 0, 0))
+	if strings.Contains(rec.Body.String(), secret) || strings.Contains(lastRecord(t).Error, secret) || bytes.Contains(trace, []byte(secret)) {
+		t.Fatal("gateway error, usage, or trace exposed embedded provider credential")
+	}
+}
+
+func TestGatewayFailureStreamMetadataCredential(t *testing.T) {
+	fresh(t)
+	const secret = "synthetic-metadata-secret-7291"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "id: "+secret+"\n: "+secret+"\ndata: {\"error\":{\"message\":\"bad key\"}}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatal("gateway error stream exposed provider credential in metadata")
+	}
+}
+
+func TestGatewayShortCredentialPreservesErrorProtocol(t *testing.T) {
+	fresh(t)
+	const secret = "or"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid credential or"}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	var reply struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reply); err != nil || reply.Error.Type != "authentication_error" || reply.Error.Message == "" || strings.Contains(reply.Error.Message, secret) {
+		t.Fatalf("gateway error protocol damaged or dynamic credential exposed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGatewayLongSSECommentDoesNotExposeCredential(t *testing.T) {
+	fresh(t)
+	const secret = "synthetic-long-comment-secret-7938"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, ": "+strings.Repeat("x", 5000)+secret+"\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"world\"}}]}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) || !strings.Contains(rec.Body.String(), "world") {
+		t.Fatal("long SSE comment exposed credential or interrupted normal content")
+	}
+}
+
+func TestFailureStreamShortCredentialPreservesErrorEvent(t *testing.T) {
+	const secret = "or"
+	input := "event: error\ndata: {\"error\":{\"message\":\"invalid credential or\"}}\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil || !strings.Contains(string(out), "event: error\n") || !strings.Contains(string(out), `"error"`) || strings.Contains(string(out), "credential or") {
+		t.Fatalf("SSE error protocol damaged or dynamic credential exposed: %s", out)
+	}
+}
+
+func TestGatewayShortCredentialPreservesSSEErrorProtocol(t *testing.T) {
+	fresh(t)
+	const secret = "or"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "event: error\ndata: {\"error\":{\"message\":\"invalid credential or\"}}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: error\n") || !strings.Contains(body, `"error"`) || strings.Contains(body, "credential or") {
+		t.Fatalf("gateway SSE error protocol damaged or dynamic credential exposed: %s", body)
+	}
+}
+
+func TestGatewayAnthropicRefusalProtocolCredential(t *testing.T) {
+	for _, secret := range []string{"ge", "us"} {
+		t.Run(secret, func(t *testing.T) {
+			fresh(t)
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
+				w.(http.Flusher).Flush()
+				_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"message\":\"credential "+secret+"\"}},\"usage\":{\"output_tokens\":1}}\n\n")
+			}))
+			defer up.Close()
+			if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Anthropic: up.URL, Models: []string{"test"}}); err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"fixture/test","max_tokens":30,"stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+			New().Handler().ServeHTTP(rec, req)
+			body := rec.Body.String()
+			if !strings.Contains(body, "event: message_delta\n") || !strings.Contains(body, `"type":"message_delta"`) || !strings.Contains(body, `"stop_reason":"refusal"`) || !strings.Contains(body, `"usage"`) || strings.Contains(body, "credential "+secret) {
+				t.Fatalf("Anthropic refusal protocol damaged or dynamic credential exposed: status=%d body=%s", rec.Code, body)
+			}
+		})
+	}
+}
+
+func TestFailureStreamProtocolEnumsAndDynamicSecrets(t *testing.T) {
+	const secret = "co"
+	cases := []struct {
+		name, input string
+		required    []string
+	}{
+		{"responses", "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"content_policy_violation\",\"message\":\"credential co\"}}}\n\n", []string{"event: response.failed\n", `"type":"response.failed"`, `"status":"failed"`, `"code":"content_policy_violation"`}},
+		{"chat", "data: {\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"credential co\"},\"finish_reason\":\"content_filter\"}]}\n\n", []string{`"choices"`, `"finish_reason":"content_filter"`}},
+		{"gemini", "data: {\"candidates\":[{\"finishReason\":\"SAFETY\"}],\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"error\":{\"message\":\"credential co\"}}\n\n", []string{`"candidates"`, `"finishReason":"SAFETY"`, `"promptFeedback"`, `"blockReason":"SAFETY"`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(tc.input)), reader: bufio.NewReader(strings.NewReader(tc.input)), secrets: []string{secret}}
+			out, err := io.ReadAll(reader)
+			if err != nil || strings.Contains(string(out), "credential "+secret) {
+				t.Fatalf("dynamic credential exposed: %s", out)
+			}
+			for _, want := range tc.required {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("protocol component %q changed in %s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestGatewayChatRefusalDeltaCredential(t *testing.T) {
+	fresh(t)
+	const secret = "synthetic-refusal-delta-secret-9512"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"credential "+secret+"\"},\"finish_reason\":\"content_filter\"}]}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) || !strings.Contains(rec.Body.String(), `"finish_reason":"content_filter"`) {
+		t.Fatal("chat refusal delta exposed credential or lost protocol reason")
+	}
+}
