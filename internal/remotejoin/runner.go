@@ -41,6 +41,8 @@ type Runner struct {
 	options          RunnerOptions
 	renew, catalog   func(context.Context) (ClientStatus, error)
 	op               sync.Mutex
+	refreshMu        sync.Mutex
+	refreshCancel    context.CancelFunc
 	mu               sync.RWMutex
 	state            RunnerStatus
 	managed          ManagedController
@@ -128,9 +130,9 @@ func (r *Runner) snapshot() RunnerStatus { r.mu.RLock(); defer r.mu.RUnlock(); r
 
 // lockOperation lets expired commands leave the queue without executing.
 func (r *Runner) lockOperation(ctx context.Context) error {
-	return r.lockOperationMode(ctx, false)
+	return r.lockOperationMode(ctx, false, false)
 }
-func (r *Runner) lockOperationMode(ctx context.Context, stopping bool) error {
+func (r *Runner) lockOperationMode(ctx context.Context, stopping, preemptRefresh bool) error {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -150,6 +152,13 @@ func (r *Runner) lockOperationMode(ctx context.Context, stopping bool) error {
 				return err
 			}
 			return nil
+		}
+		if preemptRefresh {
+			r.refreshMu.Lock()
+			if r.refreshCancel != nil {
+				r.refreshCancel()
+			}
+			r.refreshMu.Unlock()
 		}
 		select {
 		case <-ctx.Done():
@@ -217,7 +226,7 @@ func (r *Runner) stopAttempt(ctx context.Context) error {
 		}
 		r.quiesced = true
 	}
-	if err := r.lockOperationMode(ctx, true); err != nil {
+	if err := r.lockOperationMode(ctx, true, false); err != nil {
 		return err
 	}
 	defer r.op.Unlock()
@@ -344,7 +353,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	return r.stop()
 }
 func (r *Runner) tick(ctx context.Context) time.Duration {
-	if err := r.lockOperation(ctx); err != nil {
+	if err := r.lockOperationMode(ctx, false, true); err != nil {
 		return r.options.Policy.ProbeEvery
 	}
 	defer r.op.Unlock()
@@ -639,8 +648,21 @@ func (r *Runner) Refresh(ctx context.Context) (RunnerStatus, error) {
 	if r.recoverPending || r.restorePending {
 		return r.snapshot(), errors.New("restore_pending")
 	}
-	refreshed, err := r.client.Refresh(ctx)
+	refreshCtx, cancel := context.WithCancel(ctx)
+	r.refreshMu.Lock()
+	r.refreshCancel = cancel
+	r.refreshMu.Unlock()
+	defer func() {
+		r.refreshMu.Lock()
+		r.refreshCancel = nil
+		r.refreshMu.Unlock()
+		cancel()
+	}()
+	refreshed, err := r.client.Refresh(refreshCtx)
 	if err != nil {
+		if refreshCtx.Err() != nil {
+			return r.snapshot(), refreshCtx.Err()
+		}
 		s := r.snapshot()
 		if refreshed.ServerURL == s.ServerURL && refreshed.ProviderID == s.ProviderID {
 			s.LastErrorCode = refreshed.LastErrorCode
