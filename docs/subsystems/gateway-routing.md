@@ -1,10 +1,11 @@
 # Gateway routing and fallback
 
-Held upstream HTTP errors have the current provider's configured key and
-secret access key, its alternate keys, and the incoming gateway key removed
-before they are returned or recorded in usage and routing. This protects the
-held error path; it does not guarantee removal of unknown secrets or of
-credentials emitted after a streaming response has already passed through.
+Held upstream HTTP errors and recognized SSE error events remove configured
+provider keys, secret access keys, and the incoming gateway key before they are
+returned or recorded in usage and routing. SSE errors are read one event at a
+time so a key split over network reads is not released; an event over 4 MiB is
+stopped with a generic error. This does not guarantee removal of unknown
+credentials or cover other diagnostic and protocol paths.
 
 The gateway is magpie's local LLM endpoint (`127.0.0.1:3425` by default). It
 serves Chat Completions, Responses, Anthropic Messages and Gemini. It finds

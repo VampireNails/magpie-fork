@@ -1,15 +1,90 @@
 package gateway
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yetone/magpie/internal/provider"
 )
+
+func TestStreamingErrorAfterContentDoesNotExposeProviderCredential(t *testing.T) {
+	for _, contentType := range []string{"text/event-stream", "text/plain"} {
+		t.Run(contentType, func(t *testing.T) { testStreamingErrorCredential(t, contentType) })
+	}
+}
+
+func testStreamingErrorCredential(t *testing.T, contentType string) {
+	fresh(t)
+	const key = "synthetic-stream-vendor-secret-9876"
+	const other = "synthetic-unrelated-vendor-secret-4567"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", contentType)
+		_, _ = w.Write([]byte("data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"invalid key: " + key + "\",\"" + other + "\":\"field\"}}\n\n"))
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: key, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Save(provider.Provider{ID: "other", Name: "Other", Key: other, Chat: up.URL + "/v1", Models: []string{"other"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	s.Handler().ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "hello") {
+		t.Fatal("stream never began")
+	}
+	if strings.Contains(rec.Body.String(), key) || strings.Contains(rec.Body.String(), other) {
+		t.Fatal("streamed error exposed provider credential")
+	}
+	trace, _ := json.Marshal(s.Trace(context.Background(), 0, 0))
+	if strings.Contains(string(trace), key) || strings.Contains(string(trace), other) || strings.Contains(lastRecord(t).Error, key) || strings.Contains(lastRecord(t).Error, other) {
+		t.Fatal("diagnostic exposed provider credential")
+	}
+}
+
+func TestFailureJSONKeyAndSplitStream(t *testing.T) {
+	const secret = "synthetic-key-field-2468"
+	body := []byte(`{"error":{"message":"failed","` + secret + `":"value"}}`)
+	if got := hideFailureBody(body, []string{secret}); bytes.Contains(got, []byte(secret)) || !json.Valid(got) {
+		t.Fatal("JSON key was not redacted")
+	}
+	input := "data: {\"error\":{\"message\":\"" + secret + "\"}}\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReaderSize(strings.NewReader(input), 16), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil || strings.Contains(string(out), secret) || !strings.Contains(string(out), "[redacted]") {
+		t.Fatal("split stream error not redacted")
+	}
+}
+
+func TestErrorStreamPassesStandaloneKeepalive(t *testing.T) {
+	r, w := io.Pipe()
+	defer r.Close()
+	defer w.Close()
+	s := &upstreamErrorStream{body: r, reader: bufio.NewReader(r)}
+	got := make(chan string, 1)
+	go func() { b := make([]byte, 100); n, _ := s.Read(b); got <- string(b[:n]) }()
+	go func() { _, _ = io.WriteString(w, ": keepalive\n") }()
+	select {
+	case line := <-got:
+		if line != ": keepalive\n" {
+			t.Fatalf("unexpected keepalive: %q", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("standalone keepalive was buffered")
+	}
+}
 
 func TestUpstreamErrorDoesNotExposeProviderCredential(t *testing.T) {
 	const key = "synthetic-vendor-api-secret-7291"

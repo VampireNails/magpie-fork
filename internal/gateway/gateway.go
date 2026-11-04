@@ -3437,10 +3437,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		// about to be recorded in routing/usage and possibly returned to the
 		// client, so remove this attempt's known credentials at that boundary.
 		if !hw.passing && hw.code() >= 400 {
-			secrets := append([]string{c.p.Key, c.p.SecretAccessKey}, callerKeys(r)...)
-			for _, key := range c.p.Keys {
-				secrets = append(secrets, key.Key)
-			}
+			secrets := append(failureSecrets(c.p, r.Header), callerKeys(r)...)
 			call.Error = hideFailureSecrets(call.Error, secrets)
 			call.Usage.ErrType = hideFailureSecrets(call.Usage.ErrType, secrets)
 			call.Usage.RequestID = hideFailureSecrets(call.Usage.RequestID, secrets)
@@ -4870,6 +4867,9 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	// (#4145), not one asked before it
 	defer func() {
 		if err == nil {
+			if res != nil && res.Body != nil && res.StatusCode < 400 {
+				res.Body = &upstreamCredentialBody{ReadCloser: res.Body, secrets: failureSecrets(p, in)}
+			}
 			heardReply(ctx, p, res)
 			heardNet() // the network is up (offline.go)
 		}
@@ -6419,7 +6419,7 @@ func streamFailure(proto provider.Protocol, msg string) []byte {
 func eventStream(res *http.Response) (io.Reader, bool) {
 	ct := res.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "text/event-stream") {
-		return res.Body, true
+		return protectErrorEvents(res, res.Body), true
 	}
 	if ct != "" && !strings.HasPrefix(ct, "text/plain") {
 		return res.Body, false
@@ -6430,7 +6430,7 @@ func eventStream(res *http.Response) (io.Reader, bool) {
 	for _, pfx := range []string{"event:", "data:", ":"} {
 		if bytes.HasPrefix(head, []byte(pfx)) {
 			res.Header.Set("Content-Type", "text/event-stream")
-			return br, true
+			return protectErrorEvents(res, br), true
 		}
 	}
 	return br, false
