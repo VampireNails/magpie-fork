@@ -3433,6 +3433,29 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			break
 		}
 		hw.settle()
+		// A provider can echo its credential in an error. Held failures are
+		// about to be recorded in routing/usage and possibly returned to the
+		// client, so remove this attempt's known credentials at that boundary.
+		if !hw.passing && hw.code() >= 400 {
+			secrets := append([]string{c.p.Key, c.p.SecretAccessKey}, callerKeys(r)...)
+			for _, key := range c.p.Keys {
+				secrets = append(secrets, key.Key)
+			}
+			call.Error = hideFailureSecrets(call.Error, secrets)
+			call.Usage.ErrType = hideFailureSecrets(call.Usage.ErrType, secrets)
+			call.Usage.RequestID = hideFailureSecrets(call.Usage.RequestID, secrets)
+			hw.failMsg = hideFailureSecrets(hw.failMsg, secrets)
+			body := hideFailureBody(hw.held.Bytes(), secrets)
+			hw.held.Reset()
+			_, _ = hw.held.Write(body)
+			hw.header.Del("Content-Length")
+			for name, values := range hw.header {
+				for i := range values {
+					values[i] = hideFailureSecrets(values[i], secrets)
+				}
+				hw.header[name] = values
+			}
+		}
 		if hw.handedOver {
 			// its refusal came after its reasoning went to the agent: the
 			// next try's stream follows it as the same reply

@@ -2205,7 +2205,9 @@ func (h *holdWriter) writeHeader(code int) {
 		return
 	}
 	h.status = code
-	if h.hold && code >= 400 {
+	// An error must remain held even on the last attempt, so credentials
+	// echoed by its upstream can be removed before it reaches the client.
+	if code >= 400 {
 		return
 	}
 	if h.hold && strings.HasPrefix(h.header.Get("Content-Type"), "text/event-stream") {

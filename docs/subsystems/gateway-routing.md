@@ -1,5 +1,11 @@
 # Gateway routing and fallback
 
+Held upstream HTTP errors have the current provider's configured key and
+secret access key, its alternate keys, and the incoming gateway key removed
+before they are returned or recorded in usage and routing. This protects the
+held error path; it does not guarantee removal of unknown secrets or of
+credentials emitted after a streaming response has already passed through.
+
 The gateway is magpie's local LLM endpoint (`127.0.0.1:3425` by default). It
 serves Chat Completions, Responses, Anthropic Messages and Gemini. It finds
 the provider, key or account and model for each request. When the upstream
