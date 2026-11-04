@@ -207,3 +207,118 @@ func TestLastAttemptHoldsErrorBeforeRelease(t *testing.T) {
 		t.Fatal("last attempt sent an error before credentials could be removed")
 	}
 }
+
+func TestFailureJSONNumericCredential(t *testing.T) {
+	const secret = "123456789"
+	got := hideFailureBody([]byte(`{"error":{"code":123456789,"message":"invalid key"}}`), []string{secret})
+	if bytes.Contains(got, []byte(secret)) || !json.Valid(got) {
+		t.Fatal("numeric credential exposed or JSON invalid")
+	}
+}
+
+func TestFailureEmbeddedShortCredential(t *testing.T) {
+	const secret = "abc123"
+	got := hideFailureBody([]byte(`{"error":{"message":"invalid credential: prefixabc123suffix"}}`), []string{secret})
+	if bytes.Contains(got, []byte(secret)) {
+		t.Fatal("embedded short credential exposed")
+	}
+}
+
+func TestFailureCredentialNotReintroducedByMarker(t *testing.T) {
+	got := hideFailureBody([]byte(`{"error":{"message":"invalid credential: ed"}}`), []string{"ed"})
+	if bytes.Contains(got, []byte("ed")) {
+		t.Fatal("marker reintroduced credential")
+	}
+}
+
+func TestFailureJSONEncodedCredentialAsKey(t *testing.T) {
+	const secret = "synthetic/key-7812"
+	const encoded = "synthetic%2Fkey-7812"
+	got := hideFailureBody([]byte(`{"error":{"synthetic%2Fkey-7812":"failed"}}`), []string{secret})
+	if bytes.Contains(got, []byte(encoded)) || !json.Valid(got) {
+		t.Fatal("encoded credential exposed in JSON property name")
+	}
+}
+
+func TestFailureStreamMetadataCredential(t *testing.T) {
+	const secret = "synthetic-stream-metadata-secret-5832"
+	input := "id: " + secret + "\n: " + secret + "\ndata: {\"error\":{\"message\":\"invalid key\"}}\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil || strings.Contains(string(out), secret) {
+		t.Fatal("stream error metadata exposed credential")
+	}
+}
+
+func TestFailureStreamPlainErrorCredential(t *testing.T) {
+	const secret = "synthetic-plain-stream-secret-7482"
+	input := "event: error\ndata: invalid credential " + secret + "\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil || strings.Contains(string(out), secret) {
+		t.Fatal("plain stream error exposed credential")
+	}
+}
+
+func TestGatewayFailureJSONNumericCredential(t *testing.T) {
+	fresh(t)
+	const secret = "123456789"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"code":123456789,"message":"invalid credential"}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatal("gateway error exposed numeric provider credential")
+	}
+}
+
+func TestGatewayFailureEmbeddedShortCredential(t *testing.T) {
+	fresh(t)
+	const secret = "abc123"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid credential prefixabc123suffix"}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	s := New()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","messages":[{"role":"user","content":"hello"}]}`))
+	s.Handler().ServeHTTP(rec, req)
+	trace, _ := json.Marshal(s.Trace(context.Background(), 0, 0))
+	if strings.Contains(rec.Body.String(), secret) || strings.Contains(lastRecord(t).Error, secret) || bytes.Contains(trace, []byte(secret)) {
+		t.Fatal("gateway error, usage, or trace exposed embedded provider credential")
+	}
+}
+
+func TestGatewayFailureStreamMetadataCredential(t *testing.T) {
+	fresh(t)
+	const secret = "synthetic-metadata-secret-7291"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "id: "+secret+"\n: "+secret+"\ndata: {\"error\":{\"message\":\"bad key\"}}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) {
+		t.Fatal("gateway error stream exposed provider credential in metadata")
+	}
+}

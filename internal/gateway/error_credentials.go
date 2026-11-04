@@ -30,6 +30,20 @@ func failureSecrets(p provider.Provider, in http.Header) []string {
 // hideFailureSecrets removes credentials known to this attempt even when a
 // vendor returns one in an error. Do not rely on the credential's shape.
 func hideFailureSecrets(s string, secrets []string) string {
+	marker := ""
+	for _, candidate := range []string{"[redacted]", "***", "###", "~~~"} {
+		safe := true
+		for _, secret := range secrets {
+			if secret != "" && strings.Contains(candidate, secret) {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			marker = candidate
+			break
+		}
+	}
 	for _, secret := range secrets {
 		if secret == "" {
 			continue
@@ -39,21 +53,21 @@ func hideFailureSecrets(s string, secrets []string) string {
 			if value == "" {
 				continue
 			}
-			s = hideOneSecret(s, value)
+			s = hideOneSecret(s, value, marker)
 		}
 	}
 	return s
 }
 
 // hideOneSecret removes a credential from text. A real credential is replaced
-// wherever it appears. A value too short to be told from prose (fewer than 8
-// characters) is replaced only where it stands alone: withholding the whole
+// wherever it appears. A one-byte value cannot be told from prose and is
+// replaced only where it stands alone: withholding the whole
 // message when a character happened to appear lost the vendor's own words
 // (#248's refusal advice), and replacing it inside them mangled them
 // ("magpie-gro[redacted]").
-func hideOneSecret(s, value string) string {
-	if len(value) >= 8 {
-		return strings.ReplaceAll(s, value, "[redacted]")
+func hideOneSecret(s, value, marker string) string {
+	if len(value) >= 2 {
+		return strings.ReplaceAll(s, value, marker)
 	}
 	var b strings.Builder
 	for {
@@ -71,7 +85,7 @@ func hideOneSecret(s, value string) string {
 		}
 		if !wordByte(before) && !wordByte(after) {
 			b.WriteString(s[:i])
-			b.WriteString("[redacted]")
+			b.WriteString(marker)
 			s = s[i+len(value):]
 			continue
 		}
@@ -101,6 +115,13 @@ func hideFailureBody(body []byte, secrets []string) []byte {
 			out := hideFailureSecrets(v, secrets)
 			changed = changed || out != v
 			return out
+		case json.Number:
+			out := hideFailureSecrets(string(v), secrets)
+			if out != string(v) {
+				changed = true
+				return out
+			}
+			return v
 		case []any:
 			for i := range v {
 				v[i] = scrub(v[i])
@@ -108,12 +129,7 @@ func hideFailureBody(body []byte, secrets []string) []byte {
 		case map[string]any:
 			out := make(map[string]any, len(v))
 			for k, item := range v {
-				name := k
-				for _, secret := range secrets {
-					if secret != "" && strings.Contains(k, secret) {
-						name = hideFailureSecrets(name, []string{secret})
-					}
-				}
+				name := hideFailureSecrets(k, secrets)
 				changed = changed || name != k
 				if _, exists := out[name]; exists {
 					return nil
@@ -171,7 +187,7 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 			// A standalone SSE comment is a keepalive even without an empty
 			// line (another Magpie sends these while a request is queued).
 			if len(event) == 0 && err == nil && bytes.HasPrefix(part, []byte(":")) {
-				s.pending = append([]byte(nil), part...)
+				s.pending = []byte(hideFailureSecrets(string(part), s.secrets))
 				break
 			}
 			event = append(event, part...)
@@ -201,7 +217,14 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 			break
 		}
 		kind, _, _ := streamEvent(event)
-		if kind == eventError || kind == eventRefusalError || kind == eventRefusal {
+		namedError := false
+		for _, line := range bytes.Split(event, []byte("\n")) {
+			if bytes.HasPrefix(line, []byte("event:")) {
+				name := strings.TrimSpace(string(line[len("event:"):]))
+				namedError = name == "error" || name == "response.failed"
+			}
+		}
+		if namedError || kind == eventError || kind == eventRefusalError || kind == eventRefusal {
 			lines := bytes.SplitAfter(event, []byte("\n"))
 			for i, line := range lines {
 				if bytes.HasPrefix(line, []byte("data:")) {
@@ -213,6 +236,10 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 					}
 					payload := bytes.TrimSpace(line[len("data:"):])
 					lines[i] = append(append([]byte("data: "), hideFailureBody(payload, s.secrets)...), ending...)
+				} else if colon := bytes.IndexByte(line, ':'); colon >= 0 {
+					// SSE metadata (including comments and IDs) can also carry
+					// a credential in an upstream error.
+					lines[i] = append(append([]byte(nil), line[:colon+1]...), []byte(hideFailureSecrets(string(line[colon+1:]), s.secrets))...)
 				}
 			}
 			event = bytes.Join(lines, nil)
