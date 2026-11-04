@@ -601,6 +601,9 @@ func run(args []string) error {
 		// default is magpie's word in any case, as an agent's name and a
 		// field's are: magpie codex DEFAULT wrote model = "DEFAULT"
 		if strings.EqualFold(args[1], "default") {
+			if handled, err := forwardManaged(a, "agent-default", "", ""); handled {
+				return err
+			}
 			if a.Wired() {
 				return disconnect(a)
 			}
@@ -645,6 +648,9 @@ func set(a *agent.Agent, key, value string) error {
 	}
 	value, err := a.Spell(f.Key, value)
 	if err != nil {
+		return err
+	}
+	if handled, err := forwardManaged(a, "agent-pick", f.Key, value); handled {
 		return err
 	}
 	before := f.Get()
