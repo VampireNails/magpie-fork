@@ -37,33 +37,34 @@ type RunnerStatus struct {
 	LastHealthAt time.Time `json:"lastHealthAt,omitempty"`
 }
 type Runner struct {
-	client           *Client
-	options          RunnerOptions
-	renew, catalog   func(context.Context) (ClientStatus, error)
-	op               sync.Mutex
-	refreshMu        sync.Mutex
-	refreshCancel    context.CancelFunc
-	mu               sync.RWMutex
-	state            RunnerStatus
-	managed          ManagedController
-	owner            *connectionOwner
-	ready            chan struct{}
-	readyOnce        sync.Once
-	recoverPending   bool
-	restorePending   bool
-	offlineRestored  bool
-	offlineSince     time.Time
-	nextRegistration time.Time
-	nextCatalog      time.Time
-	quiesced         bool
-	retryCount       int
-	stopMu           sync.Mutex
-	stopAttemptState *runnerStopAttempt
-	stopping         atomic.Bool
-	admissionMu      sync.Mutex
-	lifecycle        sync.Mutex
-	runCancel        context.CancelFunc
-	runStarted       bool
+	client            *Client
+	options           RunnerOptions
+	renew, catalog    func(context.Context) (ClientStatus, error)
+	op                sync.Mutex
+	refreshMu         sync.Mutex
+	refreshCancel     context.CancelFunc
+	refreshGeneration uint64
+	mu                sync.RWMutex
+	state             RunnerStatus
+	managed           ManagedController
+	owner             *connectionOwner
+	ready             chan struct{}
+	readyOnce         sync.Once
+	recoverPending    bool
+	restorePending    bool
+	offlineRestored   bool
+	offlineSince      time.Time
+	nextRegistration  time.Time
+	nextCatalog       time.Time
+	quiesced          bool
+	retryCount        int
+	stopMu            sync.Mutex
+	stopAttemptState  *runnerStopAttempt
+	stopping          atomic.Bool
+	admissionMu       sync.Mutex
+	lifecycle         sync.Mutex
+	runCancel         context.CancelFunc
+	runStarted        bool
 }
 type runnerStopAttempt struct {
 	done chan struct{}
@@ -135,6 +136,7 @@ func (r *Runner) lockOperation(ctx context.Context) error {
 func (r *Runner) lockOperationMode(ctx context.Context, stopping, preemptRefresh bool) error {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
+	var nextProbe time.Time
 	for {
 		if !stopping && r.stopping.Load() {
 			return errors.New("remote_owner_stopping")
@@ -153,12 +155,26 @@ func (r *Runner) lockOperationMode(ctx context.Context, stopping, preemptRefresh
 			}
 			return nil
 		}
-		if preemptRefresh {
+		if preemptRefresh && !time.Now().Before(nextProbe) {
 			r.refreshMu.Lock()
-			if r.refreshCancel != nil {
-				r.refreshCancel()
-			}
+			active := r.refreshCancel != nil
+			generation := r.refreshGeneration
 			r.refreshMu.Unlock()
+			if active {
+				// Health can be checked independently while registration waits on
+				// the network. Only interrupt the same refresh if health fails.
+				callCtx, cancel := context.WithTimeout(ctx, r.options.Policy.ProbeTimeout)
+				health := r.options.Probe(callCtx, r.snapshot().ClientStatus)
+				cancel()
+				nextProbe = time.Now().Add(r.options.Policy.ProbeEvery)
+				if !health.Healthy && ctx.Err() == nil {
+					r.refreshMu.Lock()
+					if r.refreshCancel != nil && r.refreshGeneration == generation {
+						r.refreshCancel()
+					}
+					r.refreshMu.Unlock()
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -650,6 +666,7 @@ func (r *Runner) Refresh(ctx context.Context) (RunnerStatus, error) {
 	}
 	refreshCtx, cancel := context.WithCancel(ctx)
 	r.refreshMu.Lock()
+	r.refreshGeneration++
 	r.refreshCancel = cancel
 	r.refreshMu.Unlock()
 	defer func() {

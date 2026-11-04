@@ -33,9 +33,17 @@ func TestSlowRefreshDoesNotBlockOfflineRestore(t *testing.T) {
 	c := NewClient(ClientOptions{HTTPClient: srv.Client(), Binding: &fakeBinding{}})
 	m := &runnerManaged{}
 	var healthy atomic.Bool
+	var watchProbe atomic.Bool
+	probeObserved := make(chan struct{}, 1)
 	healthy.Store(true)
-	runner := NewRunner(c, RunnerOptions{Managed: func() (ManagedController, error) { return m, nil }, Policy: RunnerPolicy{OfflineWindow: 200 * time.Millisecond}, Probe: func(context.Context, ClientStatus) HealthResult {
+	runner := NewRunner(c, RunnerOptions{Managed: func() (ManagedController, error) { return m, nil }, Policy: RunnerPolicy{OfflineWindow: 200 * time.Millisecond, ProbeEvery: 30 * time.Millisecond}, Probe: func(context.Context, ClientStatus) HealthResult {
 		if healthy.Load() {
+			if watchProbe.Load() {
+				select {
+				case probeObserved <- struct{}{}:
+				default:
+				}
+			}
 			return HealthResult{Healthy: true, Reachable: true}
 		}
 		return HealthResult{Code: "health_unreachable"}
@@ -62,9 +70,19 @@ func TestSlowRefreshDoesNotBlockOfflineRestore(t *testing.T) {
 		t.Fatal("refresh did not reach server")
 	}
 	time.Sleep(250 * time.Millisecond)
+	healthy.Store(true)
+	watchProbe.Store(true)
 	began := time.Now()
 	doneTick := make(chan struct{})
 	go func() { runner.tick(context.Background()); close(doneTick) }()
+	select {
+	case <-probeObserved:
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("healthy probe did not run while refresh was stalled")
+	}
+	healthy.Store(false)
+	watchProbe.Store(false)
 	select {
 	case <-doneTick:
 	case <-time.After(2 * time.Second):
