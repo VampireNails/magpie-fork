@@ -4876,7 +4876,20 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	defer func() {
 		if err == nil {
 			if res != nil && res.Body != nil && res.StatusCode < 400 {
-				res.Body = &upstreamCredentialBody{ReadCloser: res.Body, secrets: failureSecrets(p, in)}
+				secrets := failureSecrets(p, in)
+				res.Body = &upstreamCredentialBody{ReadCloser: res.Body, secrets: secrets}
+				// A stream can fail after its HTTP 200 headers have already
+				// reached the client and usage recorder. Protect those headers
+				// before either consumer can observe them.
+				for _, name := range []string{"Request-Id", "X-Request-Id"} {
+					values := res.Header.Values(name)
+					for i := range values {
+						values[i] = hideFailureSecrets(values[i], secrets)
+					}
+					if len(values) != 0 {
+						res.Header[http.CanonicalHeaderKey(name)] = values
+					}
+				}
 			}
 			heardReply(ctx, p, res)
 			heardNet() // the network is up (offline.go)
