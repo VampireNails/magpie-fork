@@ -54,6 +54,7 @@ type Runner struct {
 	restorePending    bool
 	offlineRestored   bool
 	offlineSince      time.Time
+	storageErrorSince time.Time
 	nextRegistration  time.Time
 	nextCatalog       time.Time
 	quiesced          bool
@@ -368,6 +369,25 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	return r.stop()
 }
+
+// detachLostState closes admission if the active connection's local state is
+// lost. A failed restore remains pending and is retried before any network.
+func (r *Runner) detachLostState(s *RunnerStatus) error {
+	if !s.Connected {
+		return nil
+	}
+	r.managed.SetConnection(true, false)
+	s.Connected = false
+	if err := r.managed.Restore(); err != nil {
+		r.restorePending = true
+		s.State = "restore-failed"
+		s.LastErrorCode = "restore_failed"
+		return err
+	}
+	r.offlineRestored = true
+	return nil
+}
+
 func (r *Runner) tick(ctx context.Context) time.Duration {
 	if err := r.lockOperationMode(ctx, false, true); err != nil {
 		return r.options.Policy.ProbeEvery
@@ -400,11 +420,26 @@ func (r *Runner) tick(ctx context.Context) time.Duration {
 	}
 	stored, err := r.client.Status(ctx)
 	if err != nil {
+		now := r.options.Now()
+		if r.storageErrorSince.IsZero() {
+			r.storageErrorSince = now
+		}
+		if remaining := r.options.Policy.OfflineWindow - now.Sub(r.storageErrorSince); s.Connected && remaining > 0 {
+			s.State = "retrying"
+			s.LastErrorCode = "connection_storage_unavailable"
+			r.publish(s)
+			return min(r.options.Policy.ProbeEvery, remaining)
+		}
+		if r.detachLostState(&s) != nil {
+			r.publish(s)
+			return r.options.Policy.RestoreRetry
+		}
 		s.State = "error"
 		s.LastErrorCode = "connection_storage_unavailable"
 		r.publish(s)
 		return r.options.Policy.RestoreRetry
 	}
+	r.storageErrorSince = time.Time{}
 	s.ClientStatus = stored
 	if stored.ConnectionMode == "paused" {
 		s.State = "paused"
@@ -413,6 +448,12 @@ func (r *Runner) tick(ctx context.Context) time.Duration {
 		return r.options.Policy.ProbeEvery
 	}
 	if stored.ServerURL == "" {
+		// The connection file can disappear while this owner is running. Do
+		// not leave its previous agent wiring admitted with no server to use.
+		if r.detachLostState(&s) != nil {
+			r.publish(s)
+			return r.options.Policy.RestoreRetry
+		}
 		s.State = "unconfigured"
 		r.publish(s)
 		return r.options.Policy.ProbeEvery
