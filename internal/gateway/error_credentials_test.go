@@ -402,3 +402,75 @@ func TestGatewayShortCredentialPreservesSSEErrorProtocol(t *testing.T) {
 		t.Fatalf("gateway SSE error protocol damaged or dynamic credential exposed: %s", body)
 	}
 }
+
+func TestGatewayAnthropicRefusalProtocolCredential(t *testing.T) {
+	for _, secret := range []string{"ge", "us"} {
+		t.Run(secret, func(t *testing.T) {
+			fresh(t)
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
+				w.(http.Flusher).Flush()
+				_, _ = io.WriteString(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"message\":\"credential "+secret+"\"}},\"usage\":{\"output_tokens\":1}}\n\n")
+			}))
+			defer up.Close()
+			if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Anthropic: up.URL, Models: []string{"test"}}); err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"fixture/test","max_tokens":30,"stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+			New().Handler().ServeHTTP(rec, req)
+			body := rec.Body.String()
+			if !strings.Contains(body, "event: message_delta\n") || !strings.Contains(body, `"type":"message_delta"`) || !strings.Contains(body, `"stop_reason":"refusal"`) || !strings.Contains(body, `"usage"`) || strings.Contains(body, "credential "+secret) {
+				t.Fatalf("Anthropic refusal protocol damaged or dynamic credential exposed: status=%d body=%s", rec.Code, body)
+			}
+		})
+	}
+}
+
+func TestFailureStreamProtocolEnumsAndDynamicSecrets(t *testing.T) {
+	const secret = "co"
+	cases := []struct {
+		name, input string
+		required    []string
+	}{
+		{"responses", "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"content_policy_violation\",\"message\":\"credential co\"}}}\n\n", []string{"event: response.failed\n", `"type":"response.failed"`, `"status":"failed"`, `"code":"content_policy_violation"`}},
+		{"chat", "data: {\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"credential co\"},\"finish_reason\":\"content_filter\"}]}\n\n", []string{`"choices"`, `"finish_reason":"content_filter"`}},
+		{"gemini", "data: {\"candidates\":[{\"finishReason\":\"SAFETY\"}],\"promptFeedback\":{\"blockReason\":\"SAFETY\"},\"error\":{\"message\":\"credential co\"}}\n\n", []string{`"candidates"`, `"finishReason":"SAFETY"`, `"promptFeedback"`, `"blockReason":"SAFETY"`}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(tc.input)), reader: bufio.NewReader(strings.NewReader(tc.input)), secrets: []string{secret}}
+			out, err := io.ReadAll(reader)
+			if err != nil || strings.Contains(string(out), "credential "+secret) {
+				t.Fatalf("dynamic credential exposed: %s", out)
+			}
+			for _, want := range tc.required {
+				if !strings.Contains(string(out), want) {
+					t.Errorf("protocol component %q changed in %s", want, out)
+				}
+			}
+		})
+	}
+}
+
+func TestGatewayChatRefusalDeltaCredential(t *testing.T) {
+	fresh(t)
+	const secret = "synthetic-refusal-delta-secret-9512"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"credential "+secret+"\"},\"finish_reason\":\"content_filter\"}]}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) || !strings.Contains(rec.Body.String(), `"finish_reason":"content_filter"`) {
+		t.Fatal("chat refusal delta exposed credential or lost protocol reason")
+	}
+}

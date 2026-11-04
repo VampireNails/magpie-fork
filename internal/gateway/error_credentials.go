@@ -137,7 +137,7 @@ func hideFailureBody(body []byte, secrets []string) []byte {
 				if _, exists := out[name]; exists {
 					return nil
 				}
-				if k == "type" && errorProtocolType(item) {
+				if errorProtocolEnum(k, item) {
 					out[name] = item
 				} else {
 					out[name] = scrub(item)
@@ -162,20 +162,87 @@ func hideFailureBody(body []byte, secrets []string) []byte {
 // Mutating them makes clients unable to decode the error.
 func errorProtocolField(name string) bool {
 	switch name {
-	case "error", "message", "type", "code", "param", "status", "response", "id", "object", "choices", "delta", "index", "finish_reason", "stop_reason", "stop_details", "content_block", "content", "text", "refusal", "usage", "request_id":
+	case "error", "message", "type", "code", "param", "status", "response", "id", "object", "choices", "delta", "index", "finish_reason", "finishReason", "stop_reason", "stop_details", "stop_sequence", "content_block", "content", "text", "refusal", "usage", "request_id", "candidates", "promptFeedback", "blockReason", "parts", "reason", "incomplete_details", "output", "role",
+		"input_tokens", "output_tokens", "total_tokens", "prompt_tokens", "completion_tokens", "cache_read_input_tokens", "cache_creation_input_tokens", "reasoning_tokens", "input_tokens_details", "output_tokens_details", "prompt_tokens_details", "completion_tokens_details", "cached_tokens", "output_index", "content_index", "item", "part", "model", "sequence_number":
 		return true
 	}
 	return false
 }
 
-func errorProtocolType(value any) bool {
+func errorProtocolEnum(field string, value any) bool {
 	s, ok := value.(string)
 	if !ok {
 		return false
 	}
+	switch field {
+	case "type":
+		return errorProtocolEvent(s) || errorProtocolType(s)
+	case "stop_reason", "finish_reason", "finishReason", "blockReason", "reason", "code":
+		if _, ok := filterReasons[s]; ok {
+			return true
+		}
+		switch s {
+		case "error", "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "stop", "length", "tool_calls", "function_call", "STOP", "MAX_TOKENS", "RECITATION", "OTHER":
+			return true
+		}
+	case "status":
+		switch s {
+		case "queued", "in_progress", "completed", "failed", "incomplete", "cancelled":
+			return true
+		}
+	case "role":
+		return s == "assistant" || s == "user" || s == "system" || s == "tool"
+	case "object":
+		return s == "response" || s == "chat.completion" || s == "chat.completion.chunk"
+	}
+	return false
+}
+
+func errorProtocolType(s string) bool {
 	switch s {
-	case "error", "response.failed", "invalid_request_error", "authentication_error", "permission_error", "not_found_error", "rate_limit_error", "api_error", "overloaded_error", "billing_error", "server_error":
+	case "invalid_request_error", "authentication_error", "permission_error", "not_found_error", "rate_limit_error", "api_error", "overloaded_error", "billing_error", "server_error", "message", "text", "tool_use", "tool_result", "text_delta", "input_json_delta", "thinking_delta", "signature_delta", "thinking", "redacted_thinking":
 		return true
+	}
+	return false
+}
+
+// Exact event names handled by the gateway's supported streaming protocols.
+// Unknown names remain dynamic and are checked for credentials.
+func errorProtocolEvent(s string) bool {
+	switch s {
+	case "error", "ping", "message_start", "message_delta", "message_stop", "content_block_start", "content_block_delta", "content_block_stop", "codex.rate_limits", "codex.response.metadata",
+		"response.create", "response.created", "response.in_progress", "response.queued", "response.completed", "response.incomplete", "response.done", "response.failed", "response.error", "response.cancelled", "response.metadata", "response.interrupt", "response.interrupt.accepted", "response.interrupt.failed",
+		"response.output_item.added", "response.output_item.done", "response.content_part.added", "response.content_part.done", "response.output_text.delta", "response.output_text.done", "response.output_text.annotation.added",
+		"response.refusal.delta", "response.refusal.done", "response.reasoning_summary_part.added", "response.reasoning_summary_part.done", "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done", "response.reasoning_text.delta", "response.reasoning_text.done",
+		"response.function_call_arguments.delta", "response.function_call_arguments.done", "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done", "response.web_search_call.completed":
+		return true
+	}
+	return false
+}
+
+// Chat refusal deltas are streamed as content by streamEvent, but their
+// text is still a refusal diagnostic and must be protected.
+func hasChatRefusalDelta(event []byte) bool {
+	var data []byte
+	for _, line := range bytes.Split(event, []byte("\n")) {
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data = append(data, bytes.TrimSpace(line[len("data:"):])...)
+		}
+	}
+	var v struct {
+		Choices []struct {
+			Delta struct {
+				Refusal json.RawMessage `json:"refusal"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal(data, &v) != nil {
+		return false
+	}
+	for _, choice := range v.Choices {
+		if len(choice.Delta.Refusal) > 0 && string(choice.Delta.Refusal) != "null" {
+			return true
+		}
 	}
 	return false
 }
@@ -267,7 +334,7 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 				namedError = name == "error" || name == "response.failed"
 			}
 		}
-		if namedError || kind == eventError || kind == eventRefusalError || kind == eventRefusal {
+		if namedError || kind == eventError || kind == eventRefusalError || kind == eventRefusal || hasChatRefusalDelta(event) {
 			lines := bytes.SplitAfter(event, []byte("\n"))
 			for i, line := range lines {
 				if bytes.HasPrefix(line, []byte("data:")) {
@@ -282,7 +349,7 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 				} else if colon := bytes.IndexByte(line, ':'); colon >= 0 {
 					if bytes.Equal(line[:colon], []byte("event")) {
 						name := strings.TrimSpace(string(line[colon+1:]))
-						if name == "error" || name == "response.failed" {
+						if errorProtocolEvent(name) {
 							continue
 						}
 					}
