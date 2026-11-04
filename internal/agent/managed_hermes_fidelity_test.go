@@ -292,48 +292,6 @@ func TestManagedHermesAliasSnapshotChangedAnchor(t *testing.T) {
 	}
 }
 
-func TestManagedHermesParentAliasConflictRetriesSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	target := hermesManagedTarget(path, "providers.magpie")
-	original := "shared: &saved {mine: old}\nproviders: *saved # providers note\nother: keep\n"
-	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
-		t.Fatal(err)
-	}
-	snap, err := hermesManagedCapture(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed := "shared: &saved {mine: changed}\nproviders:\n  magpie: {name: managed}\n  added: keep\nother: keep\n"
-	if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := hermesManagedRestore(target, snap); err == nil {
-		t.Fatal("overwrote unrelated child")
-	}
-	raw, _ := os.ReadFile(path)
-	if string(raw) != changed {
-		t.Fatalf("failed restore changed file: %s", raw)
-	}
-	retry := strings.Replace(changed, "  added: keep\n", "", 1)
-	if err := os.WriteFile(path, []byte(retry), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := hermesManagedRestore(target, snap); err != nil {
-		t.Fatal(err)
-	}
-	raw, _ = os.ReadFile(path)
-	var got struct {
-		Shared    map[string]string `yaml:"shared"`
-		Providers map[string]string `yaml:"providers"`
-	}
-	if err := yaml.Unmarshal(raw, &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.Shared["mine"] != "changed" || got.Providers["mine"] != "old" {
-		t.Errorf("lost snapshot or anchor edit: %s", raw)
-	}
-}
-
 func TestManagedHermesDuplicateAnchorMaterializesSnapshot(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	target := hermesManagedTarget(path, "model")
@@ -445,14 +403,56 @@ func TestManagedHermesNestedAliasTargetCommentsNotCopied(t *testing.T) {
 	}
 }
 
-func TestManagedHermesParentAliasJournalRetriesConflict(t *testing.T) {
+func TestManagedHermesParentAliasMergeLifecycle(t *testing.T) {
 	home := managedEntryHome(t)
 	managedEntryConfigured(t)
 	a := hermes(home)
 	if err := os.MkdirAll(a.Dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	original := "shared: &saved {mine: old}\nproviders: *saved # providers note\nmodel: {default: own, provider: own}\nother: keep # other note\n"
+	before := "shared: &saved {magpie: {name: old}, mine: old}\nproviders: *saved # parent note\nmodel: {default: own, provider: own}\n"
+	if err := os.WriteFile(a.Path, []byte(before), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewManagedStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entryLifecycleEnable(t, store)
+	t.Cleanup(func() { _ = m.Close() })
+	if err := a.Apply("model", "magpie/fixture/one"); err != nil {
+		t.Fatal(err)
+	}
+	current := "shared: &saved {magpie: {name: changed}, mine: changed}\nproviders: {magpie: {name: managed}, added: keep}\nmodel: {default: managed, provider: magpie}\n"
+	if err := os.WriteFile(a.Path, []byte(current), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Disconnect(); err != nil {
+		t.Fatalf("disconnect: %v", err)
+	}
+	raw, err := os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Shared    map[string]any `yaml:"shared"`
+		Providers map[string]any `yaml:"providers"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Shared["mine"] != "changed" || got.Providers["mine"] != "old" || got.Providers["added"] != "keep" || got.Providers["magpie"].(map[string]any)["name"] != "old" {
+		t.Fatalf("wrong merged values: %s", raw)
+	}
+}
+func TestManagedHermesParentAliasMergeRetry(t *testing.T) {
+	home := managedEntryHome(t)
+	managedEntryConfigured(t)
+	a := hermes(home)
+	if err := os.MkdirAll(a.Dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := "shared: &saved {magpie: {name: old}, mine: {nested: old, remove: old}}\nproviders: *saved # parent note\nmodel: {default: own, provider: own}\n"
 	if err := os.WriteFile(a.Path, []byte(original), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -465,38 +465,19 @@ func TestManagedHermesParentAliasJournalRetriesConflict(t *testing.T) {
 	if err := a.Apply("model", "magpie/fixture/one"); err != nil {
 		t.Fatal(err)
 	}
-	if err := edit.SetYAML(a.Path, edit.KV{Path: "providers.added", Value: "keep"}); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(a.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed := strings.Replace(string(raw), "mine: old", "mine: changed", 1)
-	if changed == string(raw) {
-		t.Fatalf("missing anchor: %s", raw)
-	}
-	if err := os.WriteFile(a.Path, []byte(changed), 0600); err != nil {
+	malformed := "providers: [broken\n"
+	if err := os.WriteFile(a.Path, []byte(malformed), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Disconnect(); err == nil {
-		t.Fatal("restore discarded unrelated child")
+		t.Fatal("invalid document accepted")
 	}
-	state, err := store.ManagedState("hermes")
-	if err != nil {
-		t.Fatal(err)
+	raw, _ := os.ReadFile(a.Path)
+	if string(raw) != malformed {
+		t.Fatalf("failed restore changed file: %s", raw)
 	}
-	if state.Phase == ManagedDetached {
-		t.Fatal("failed restore lost journal")
-	}
-	raw, err = os.ReadFile(a.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(raw), "added: keep") {
-		t.Fatalf("unrelated child lost: %s", raw)
-	}
-	if err := edit.DelYAML(a.Path, "providers.added"); err != nil {
+	current := "shared: &saved {magpie: {name: changed}, mine: {nested: changed}} # anchor note\nother: &other value # other note\nproviders: # parent note\n  magpie: {name: managed}\n  mine: {nested: edited} # sibling note\n  added: *other\nmodel: {default: managed, provider: magpie}\n"
+	if err := os.WriteFile(a.Path, []byte(current), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Disconnect(); err != nil {
@@ -507,13 +488,21 @@ func TestManagedHermesParentAliasJournalRetriesConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got struct {
-		Shared    map[string]string `yaml:"shared"`
-		Providers map[string]string `yaml:"providers"`
+		Providers struct {
+			Magpie map[string]string `yaml:"magpie"`
+			Mine   map[string]string `yaml:"mine"`
+			Added  string            `yaml:"added"`
+		} `yaml:"providers"`
 	}
 	if err := yaml.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Shared["mine"] != "changed" || got.Providers["mine"] != "old" || strings.Count(string(raw), "# providers note") != 1 || !strings.Contains(string(raw), "providers: {mine: old} # providers note") || strings.Count(string(raw), "# other note") != 1 || !strings.Contains(string(raw), "other: keep # other note") {
-		t.Fatalf("retry lost values or comments: %s", raw)
+	if got.Providers.Magpie["name"] != "old" || got.Providers.Mine["nested"] != "edited" || got.Providers.Mine["remove"] != "" || got.Providers.Added != "value" {
+		t.Fatalf("wrong merged values: %s", raw)
+	}
+	for _, comment := range []string{"# parent note", "# anchor note", "# other note", "# sibling note"} {
+		if strings.Count(string(raw), comment) != 1 {
+			t.Fatalf("lost or duplicated %s: %s", comment, raw)
+		}
 	}
 }

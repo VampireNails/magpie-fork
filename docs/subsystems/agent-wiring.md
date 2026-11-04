@@ -360,3 +360,11 @@ can deadlock. Managed entry guards native public entry points when configured; t
 ## Remote managed entry (candidate)
 
 A configured remote client guards WorkBuddy and Hermes public entry points and background catalog writes through [managed_entry.go](../../internal/agent/managed_entry.go). The resident runner installs the controller only after obtaining its OS owner lock, calls Recover before networking, and publishes its live owner and connected state. A detached agent begins a generation only on an explicit entry. Sync and automatic writes use the existing generation; Restore blocks and drains them before restoring the journal. Close restores before unregistering the same controller, and failure leaves it registered for retry. Disconnect holds the controller lifecycle lock through the agent slot and journal restore. After taking the slot it rejects a closed or replaced controller, so a delayed request cannot restore a new owner's generation. A failed Disconnect keeps that agent blocked for writes until restoration succeeds, even if validation failed before the journal could record the attempt. Other agents remain available. A separate CLI without the resident owner gets an explicit error. Hermes keeps its adapter-owned cleanup; WorkBuddy cleanup removes only its bookkeeping. Integration is provisional pending adapter fixes, cross-process owner transfer, and platform verification.
+
+For Hermes parent aliases, a current mapping with unrelated siblings is merged
+with the captured alias value on restore: the captured managed child wins and
+present unrelated siblings keep their current values, including nested edits.
+The editor may have discarded original siblings while replacing the alias, so a
+missing sibling is restored from the snapshot; an intentional later deletion
+of that whole sibling cannot be distinguished with this journal format. Invalid
+YAML or an output with broken aliases fails safely and remains retryable.

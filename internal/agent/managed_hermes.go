@@ -439,6 +439,9 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 			if p != nil && p.Kind == yaml.MappingNode {
 				for i := 0; i+1 < len(p.Content); i += 2 {
 					if p.Content[i].Value != parts[1] {
+						if r.ParentAlias != "" {
+							return hermesMergeParentAlias(t.Path, root, p, parts[1], r)
+						}
 						return ErrManagedRestore
 					}
 				}
@@ -1086,4 +1089,69 @@ func hermesEnvAnchorsMatch(records []hermesEnvRecord, scope string, anchors []he
 		next++
 	}
 	return next == len(anchors)
+}
+
+// Merge the captured alias value with the current siblings. The managed child
+// comes from the snapshot; a present sibling is the user's current value.
+func hermesMergeParentAlias(path string, root, current *yaml.Node, managed string, r hermesRegion) error {
+	if len(r.ParentResolved) == 0 {
+		return ErrManagedRestore
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(r.ParentResolved, &doc); err != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return ErrManagedRestore
+	}
+	saved := doc.Content[0]
+	// Preserve the existing parent node and its comments/anchor. This also keeps
+	// aliases referring to it valid when the output is re-parsed.
+	merged := make([]*yaml.Node, 0, len(saved.Content)+len(current.Content))
+	for i := 0; i+1 < len(saved.Content); i += 2 {
+		key, value := saved.Content[i], saved.Content[i+1]
+		if key.Value != managed {
+			for j := 0; j+1 < len(current.Content); j += 2 {
+				if current.Content[j].Value == key.Value {
+					key, value = current.Content[j], current.Content[j+1]
+					break
+				}
+			}
+		}
+		merged = append(merged, key, value)
+	}
+	for i := 0; i+1 < len(current.Content); i += 2 {
+		key := current.Content[i]
+		if key.Value != managed && hermesNode(saved, key.Value) == nil {
+			merged = append(merged, key, current.Content[i+1])
+		}
+	}
+	current.Content = merged
+	if current.HeadComment == "" {
+		current.HeadComment = r.ParentAliasHead
+	}
+	if current.LineComment == "" {
+		current.LineComment = r.ParentAliasLine
+	}
+	if current.FootComment == "" {
+		current.FootComment = r.ParentAliasFoot
+	}
+	raw, _, _, err := hermesManagedRead(path)
+	if err != nil {
+		return err
+	}
+	var out bytes.Buffer
+	enc := yaml.NewEncoder(&out)
+	enc.SetIndent(2)
+	if err = enc.Encode(root); err != nil {
+		return err
+	}
+	if err = enc.Close(); err != nil {
+		return err
+	}
+	result := out.Bytes()
+	if bytes.Contains(raw, []byte("\r\n")) {
+		result = bytes.ReplaceAll(result, []byte("\n"), []byte("\r\n"))
+	}
+	if _, err = hermesYAMLRoot(result); err != nil {
+		return err
+	}
+	return edit.WriteAtomic(path, result)
 }
