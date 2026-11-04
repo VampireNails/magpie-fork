@@ -91,6 +91,57 @@ func TestProbeReleasedLockBeforeDeadlineKeepsWiring(t *testing.T) {
 	}
 }
 
+func TestProbeNearDeadlineLockThenNetwork(t *testing.T) {
+	for _, healthy := range []bool{false, true} {
+		name := "network-unhealthy"
+		if healthy {
+			name = "network-healthy"
+		}
+		t.Run(name, func(t *testing.T) {
+			r, m, _, health := runnerFixture(t)
+			r.options.Now = time.Now
+			r.options.Policy.OfflineWindow = 2 * time.Second
+			tickRunner(t, r)
+			if !healthy {
+				*health = HealthResult{Code: "health_unreachable"}
+			}
+			holder := exec.Command(os.Args[0], "-test.run=^TestProbeStorageLockHolder$", "-test.count=1")
+			holder.Env = append(os.Environ(), "MAGPIE_SYNTHETIC_LOCK_PROBE="+connectionPath()+".lock")
+			out, err := holder.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := holder.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+			line, err := bufio.NewReader(out).ReadString('\n')
+			if err != nil || strings.TrimSpace(line) != "synthetic-lock-held" {
+				t.Fatalf("holder: %q %v", line, err)
+			}
+			go func() { time.Sleep(1500 * time.Millisecond); _ = holder.Process.Kill() }()
+			start := time.Now()
+			first := tickRunner(t, r)
+			_ = holder.Wait()
+			if !first.Connected || m.restored != 0 {
+				t.Fatal("detached before the window")
+			}
+			if delay := 2100*time.Millisecond - time.Since(start); delay > 0 {
+				time.Sleep(delay)
+			}
+			s := tickRunner(t, r)
+			t.Logf("elapsed=%v healthy=%v state=%s connected=%v restores=%d", time.Since(start), healthy, s.State, s.Connected, m.restored)
+			if healthy {
+				if !s.Connected || !m.connected || m.restored != 0 {
+					t.Fatal("healthy network detached")
+				}
+			} else if s.Connected || m.connected || m.restored != 1 {
+				t.Fatal("unavailable storage then network exceeded the shared window")
+			}
+		})
+	}
+}
+
 func TestProbeDefaultWindowUnderCrossProcessLock(t *testing.T) {
 	r, m, _, _ := runnerFixture(t)
 	r.options.Now = time.Now

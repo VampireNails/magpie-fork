@@ -524,7 +524,9 @@ func (r *Runner) tick(ctx context.Context) time.Duration {
 		}
 	} else {
 		if r.offlineSince.IsZero() {
-			r.offlineSince = now
+			// A failed health probe follows storage acquisition; include any
+			// wait there in this continuous unavailable interval.
+			r.offlineSince = readStart
 		}
 		s.LastErrorCode = h.Code
 		if now.Sub(r.offlineSince) >= r.options.Policy.OfflineWindow {
