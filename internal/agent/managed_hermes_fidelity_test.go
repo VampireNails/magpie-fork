@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -89,13 +91,13 @@ func TestManagedHermesAliasLifecycle(t *testing.T) {
 	if err := yaml.Unmarshal(raw, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Model.Default != "own" || got.Model.Provider != "own" || got.Other != "keep" || !strings.Contains(string(raw), "*saved") {
+	if got.Model.Default != "own" || got.Model.Provider != "own" || got.Other != "keep" || !strings.Contains(string(raw), "model: *saved # shared model") || strings.Count(string(raw), "# shared model") != 1 {
 		t.Errorf("alias not restored: %s", raw)
 	}
 	t.Logf("before:\n%s\nafter:\n%s", before, raw)
 }
 
-func TestManagedHermesAliasMissingAnchorRetries(t *testing.T) {
+func TestManagedHermesMissingAnchorMaterializesSnapshot(t *testing.T) {
 	home := managedEntryHome(t)
 	managedEntryConfigured(t)
 	a := hermes(home)
@@ -121,49 +123,38 @@ func TestManagedHermesAliasMissingAnchorRetries(t *testing.T) {
 	}
 	changed := strings.Replace(string(raw), "&saved", "", 1)
 	if changed == string(raw) {
-		t.Fatalf("anchor missing after apply: %s", raw)
+		t.Fatal("anchor missing before edit")
 	}
-	if err := os.WriteFile(a.Path, []byte(changed), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := a.Disconnect(); err == nil {
-		t.Fatal("restore without anchor succeeded")
-	}
-	state, err := store.ManagedState("hermes")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Phase == ManagedDetached {
-		t.Fatal("failed restore discarded journal")
-	}
-	raw, err = os.ReadFile(a.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed = strings.Replace(string(raw), "defaults:", "defaults: &saved", 1)
 	if err := os.WriteFile(a.Path, []byte(changed), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Disconnect(); err != nil {
-		t.Fatalf("retry: %v", err)
+		t.Fatal(err)
 	}
 	raw, err = os.ReadFile(a.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), "*saved") || !strings.Contains(string(raw), "other: keep") {
-		t.Fatalf("retry lost config: %s", raw)
+	var got struct {
+		Model map[string]string `yaml:"model"`
+		Other string            `yaml:"other"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Model["default"] != "own" || got.Other != "keep" {
+		t.Fatalf("lost snapshot or unrelated field: %s", raw)
 	}
 }
 
-func TestManagedHermesNestedExternalAliasCaptureFailsBeforeWrite(t *testing.T) {
+func TestManagedHermesNestedExternalAliasSnapshot(t *testing.T) {
 	home := managedEntryHome(t)
 	managedEntryConfigured(t)
 	a := hermes(home)
 	if err := os.MkdirAll(a.Dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	before := "shared: &saved own\nmodel:\n  default: *saved\n  provider: own\nother: keep\n"
+	before := "shared: &saved own\nmodel:\n  default: *saved # default note\n  provider: own\nother: keep # other note\n"
 	if err := os.WriteFile(a.Path, []byte(before), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -173,15 +164,39 @@ func TestManagedHermesNestedExternalAliasCaptureFailsBeforeWrite(t *testing.T) {
 	}
 	m := entryLifecycleEnable(t, store)
 	t.Cleanup(func() { _ = m.Close() })
-	if err := a.Apply("model", "magpie/fixture/one"); err == nil {
-		t.Fatal("capture accepted unresolvable nested alias")
+	if err := a.Apply("model", "magpie/fixture/one"); err != nil {
+		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(a.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(raw) != before {
-		t.Fatalf("capture failure modified config: %s", raw)
+	changed := strings.Replace(string(raw), "&saved own", "&saved changed", 1)
+	if changed == string(raw) {
+		t.Fatalf("anchor missing: %s", raw)
+	}
+	if err := os.WriteFile(a.Path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Shared string            `yaml:"shared"`
+		Model  map[string]string `yaml:"model"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Shared != "changed" || got.Model["default"] != "own" {
+		t.Errorf("lost values: %s", raw)
+	}
+	if !strings.Contains(string(raw), "default: own # default note") || !strings.Contains(string(raw), "other: keep # other note") || strings.Count(string(raw), "# default note") != 1 || strings.Count(string(raw), "# other note") != 1 {
+		t.Errorf("comments moved or duplicated: %s", raw)
 	}
 }
 
@@ -220,5 +235,285 @@ func TestManagedHermesParentAliasLifecycle(t *testing.T) {
 	}
 	if got.Providers["mine"] != "keep" || !strings.Contains(string(raw), "*saved") {
 		t.Fatalf("parent alias not restored: %s", raw)
+	}
+}
+
+func TestManagedHermesAliasSnapshotChangedAnchor(t *testing.T) {
+	home := managedEntryHome(t)
+	managedEntryConfigured(t)
+	a := hermes(home)
+	if err := os.MkdirAll(a.Dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	before := "defaults: &saved\n  default: old\n  provider: own\nmodel: *saved # model note\nother: keep # other note\n"
+	if err := os.WriteFile(a.Path, []byte(before), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewManagedStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entryLifecycleEnable(t, store)
+	t.Cleanup(func() { _ = m.Close() })
+	if err := a.Apply("model", "magpie/fixture/one"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(string(raw), "default: old", "default: changed", 1)
+	if changed == string(raw) {
+		t.Fatalf("missing anchor: %s", raw)
+	}
+	if err := os.WriteFile(a.Path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("before disconnect:\n%s", changed)
+	if err := a.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Defaults map[string]string `yaml:"defaults"`
+		Model    map[string]string `yaml:"model"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Model["default"] != "old" || got.Defaults["default"] != "changed" {
+		t.Errorf("values: %s", raw)
+	}
+	if strings.Count(string(raw), "# model note") != 1 || !strings.Contains(string(raw), "model: # model note") || strings.Count(string(raw), "# other note") != 1 || !strings.Contains(string(raw), "other: keep # other note") {
+		t.Errorf("comments duplicated/lost: %s", raw)
+	}
+}
+
+func TestManagedHermesParentAliasConflictRetriesSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	target := hermesManagedTarget(path, "providers.magpie")
+	original := "shared: &saved {mine: old}\nproviders: *saved # providers note\nother: keep\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := hermesManagedCapture(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := "shared: &saved {mine: changed}\nproviders:\n  magpie: {name: managed}\n  added: keep\nother: keep\n"
+	if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hermesManagedRestore(target, snap); err == nil {
+		t.Fatal("overwrote unrelated child")
+	}
+	raw, _ := os.ReadFile(path)
+	if string(raw) != changed {
+		t.Fatalf("failed restore changed file: %s", raw)
+	}
+	retry := strings.Replace(changed, "  added: keep\n", "", 1)
+	if err := os.WriteFile(path, []byte(retry), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hermesManagedRestore(target, snap); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(path)
+	var got struct {
+		Shared    map[string]string `yaml:"shared"`
+		Providers map[string]string `yaml:"providers"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Shared["mine"] != "changed" || got.Providers["mine"] != "old" {
+		t.Errorf("lost snapshot or anchor edit: %s", raw)
+	}
+}
+
+func TestManagedHermesDuplicateAnchorMaterializesSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	target := hermesManagedTarget(path, "model")
+	original := "first: &saved {default: old}\nmodel: *saved\nother: keep\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := hermesManagedCapture(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := "first: &saved {default: old}\nsecond: &saved {default: changed}\nmodel: {default: managed}\nother: keep\n"
+	if err := os.WriteFile(path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hermesManagedRestore(target, snap); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	var got struct {
+		Second map[string]string `yaml:"second"`
+		Model  map[string]string `yaml:"model"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Second["default"] != "changed" || got.Model["default"] != "old" {
+		t.Fatalf("wrong anchor binding: %s", raw)
+	}
+}
+
+func TestManagedHermesLegacyAliasWithoutSnapshotFailsSafely(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	target := hermesManagedTarget(path, "model")
+	current := "saved: &old {default: changed}\nmodel: {default: managed}\n"
+	if err := os.WriteFile(path, []byte(current), 0600); err != nil {
+		t.Fatal(err)
+	}
+	value, err := json.Marshal(hermesRegion{Alias: "old", Value: []byte("*old\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hermesManagedRestore(target, ManagedSnapshot{FileExists: true, Exists: true, Value: value}); err == nil {
+		t.Fatal("legacy snapshot without a value restored silently")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != current {
+		t.Fatalf("failure changed file: %s", raw)
+	}
+}
+
+func TestManagedHermesRestoreDoesNotBreakUnrelatedAlias(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	target := hermesManagedTarget(path, "model")
+	if err := os.WriteFile(path, []byte("model: {default: old}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := hermesManagedCapture(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := "model: &live {default: managed}\nother: *live\n"
+	if err := os.WriteFile(path, []byte(current), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hermesManagedRestore(target, snap); err == nil {
+		t.Fatal("restore broke an unrelated alias")
+	}
+	raw, _ := os.ReadFile(path)
+	if string(raw) != current {
+		t.Fatalf("failure changed file: %s", raw)
+	}
+}
+
+func TestManagedHermesNestedAliasTargetCommentsNotCopied(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	target := hermesManagedTarget(path, "model")
+	original := "shared: &base old\ndefaults: &saved\n  default: *base # target note\nmodel: *saved # model note\nother: keep # other note\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := hermesManagedCapture(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := "shared: &base changed\ndefaults: &saved\n  default: *base # target note\nmodel: # model note\n  default: managed\nother: keep # other note\n"
+	if err := os.WriteFile(path, []byte(current), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := hermesManagedRestore(target, snap); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	if strings.Count(string(raw), "# target note") != 1 || !strings.Contains(string(raw), "default: *base # target note") || strings.Count(string(raw), "# model note") != 1 || strings.Count(string(raw), "# other note") != 1 {
+		t.Fatalf("comments copied or moved: %s", raw)
+	}
+	var got struct {
+		Model  map[string]string `yaml:"model"`
+		Shared string            `yaml:"shared"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Model["default"] != "old" || got.Shared != "changed" {
+		t.Fatalf("values: %s", raw)
+	}
+}
+
+func TestManagedHermesParentAliasJournalRetriesConflict(t *testing.T) {
+	home := managedEntryHome(t)
+	managedEntryConfigured(t)
+	a := hermes(home)
+	if err := os.MkdirAll(a.Dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := "shared: &saved {mine: old}\nproviders: *saved # providers note\nmodel: {default: own, provider: own}\nother: keep # other note\n"
+	if err := os.WriteFile(a.Path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewManagedStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entryLifecycleEnable(t, store)
+	t.Cleanup(func() { _ = m.Close() })
+	if err := a.Apply("model", "magpie/fixture/one"); err != nil {
+		t.Fatal(err)
+	}
+	if err := edit.SetYAML(a.Path, edit.KV{Path: "providers.added", Value: "keep"}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := strings.Replace(string(raw), "mine: old", "mine: changed", 1)
+	if changed == string(raw) {
+		t.Fatalf("missing anchor: %s", raw)
+	}
+	if err := os.WriteFile(a.Path, []byte(changed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Disconnect(); err == nil {
+		t.Fatal("restore discarded unrelated child")
+	}
+	state, err := store.ManagedState("hermes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Phase == ManagedDetached {
+		t.Fatal("failed restore lost journal")
+	}
+	raw, err = os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "added: keep") {
+		t.Fatalf("unrelated child lost: %s", raw)
+	}
+	if err := edit.DelYAML(a.Path, "providers.added"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Disconnect(); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	raw, err = os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Shared    map[string]string `yaml:"shared"`
+		Providers map[string]string `yaml:"providers"`
+	}
+	if err := yaml.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Shared["mine"] != "changed" || got.Providers["mine"] != "old" || strings.Count(string(raw), "# providers note") != 1 || !strings.Contains(string(raw), "providers: {mine: old} # providers note") || strings.Count(string(raw), "# other note") != 1 || !strings.Contains(string(raw), "other: keep # other note") {
+		t.Fatalf("retry lost values or comments: %s", raw)
 	}
 }

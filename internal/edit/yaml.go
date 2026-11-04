@@ -445,10 +445,11 @@ func lookupYAML(n *yaml.Node, parts []string) *yaml.Node {
 func setYAML(m *yaml.Node, parts []string, v *yaml.Node) {
 	for i, p := range parts {
 		last := i == len(parts)-1
-		var cur *yaml.Node
+		var cur, key *yaml.Node
 		for j := 0; j+1 < len(m.Content); j += 2 {
 			if m.Content[j].Value == p {
 				cur = m.Content[j+1]
+				key = m.Content[j]
 				break
 			}
 		}
@@ -472,6 +473,11 @@ func setYAML(m *yaml.Node, parts []string, v *yaml.Node) {
 			return
 		}
 		if cur.Kind != yaml.MappingNode {
+			// yaml.v3 can emit an alias's inline comment on a later key
+			// after converting the value to a block mapping.
+			if cur.Kind == yaml.AliasNode && cur.LineComment != "" && key.LineComment == "" {
+				key.LineComment, cur.LineComment = cur.LineComment, ""
+			}
 			*cur = yaml.Node{Kind: yaml.MappingNode, HeadComment: cur.HeadComment, LineComment: cur.LineComment}
 		}
 		m = cur

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -32,6 +33,8 @@ type hermesRegion struct {
 	ParentAliasHead string `json:"parentAliasHead,omitempty"`
 	ParentAliasLine string `json:"parentAliasLine,omitempty"`
 	ParentAliasFoot string `json:"parentAliasFoot,omitempty"`
+	ParentResolved  []byte `json:"parentResolved,omitempty"`
+	Resolved        []byte `json:"resolved,omitempty"`
 	ParentMap       bool   `json:"parentMap"`
 	Value           []byte `json:"value"`
 	Alias           string `json:"alias,omitempty"`
@@ -154,6 +157,57 @@ func hermesNodeBytes(n *yaml.Node) ([]byte, error) {
 	return yaml.Marshal(n)
 }
 
+// hermesResolved copies a subtree, resolving aliases to capture-time values.
+// Reference-site comments are retained; comments and anchors from the target
+// are not copied into the reference site. A recursion bound rejects cycles.
+func hermesResolved(n *yaml.Node, inReference bool, depth int, remaining *int) (*yaml.Node, error) {
+	if n == nil {
+		return nil, nil
+	}
+	if depth > 100 || *remaining <= 0 {
+		return nil, ErrManagedCapture
+	}
+	*remaining--
+	if n.Kind == yaml.AliasNode {
+		if n.Alias == nil {
+			return nil, ErrManagedCapture
+		}
+		c, err := hermesResolved(n.Alias, true, depth+1, remaining)
+		if err != nil {
+			return nil, err
+		}
+		if !inReference {
+			c.HeadComment, c.LineComment, c.FootComment = n.HeadComment, n.LineComment, n.FootComment
+		}
+		return c, nil
+	}
+	c := *n
+	c.Alias = nil
+	c.Content = nil
+	if inReference {
+		c.Anchor = ""
+		c.HeadComment = ""
+		c.LineComment = ""
+		c.FootComment = ""
+	}
+	for _, child := range n.Content {
+		v, err := hermesResolved(child, inReference, depth+1, remaining)
+		if err != nil {
+			return nil, err
+		}
+		c.Content = append(c.Content, v)
+	}
+	return &c, nil
+}
+func hermesResolvedBytes(n *yaml.Node) ([]byte, error) {
+	remaining := 100000
+	c, err := hermesResolved(n, false, 0, &remaining)
+	if err != nil {
+		return nil, err
+	}
+	return hermesNodeBytes(c)
+}
+
 func hermesManagedCapture(t ManagedTarget) (ManagedSnapshot, error) {
 	raw, exists, mode, err := hermesManagedRead(t.Path)
 	s := ManagedSnapshot{FileExists: exists, Mode: mode}
@@ -211,6 +265,15 @@ func hermesManagedCapture(t ManagedTarget) (ManagedSnapshot, error) {
 			if err != nil {
 				return s, err
 			}
+			if parent.Kind == yaml.AliasNode {
+				r.ParentResolved, err = hermesResolvedBytes(parent)
+				if err != nil {
+					return s, err
+				}
+			}
+			if err != nil {
+				return s, err
+			}
 			if parent.Kind != yaml.AliasNode {
 				var check yaml.Node
 				if yaml.Unmarshal(r.ParentValue, &check) != nil {
@@ -228,11 +291,15 @@ func hermesManagedCapture(t ManagedTarget) (ManagedSnapshot, error) {
 	if err != nil {
 		return s, err
 	}
-	// Nested aliases to anchors outside this region cannot be parsed back in
-	// isolation. Refuse the write before losing a recoverable baseline.
-	if n != nil && n.Kind != yaml.AliasNode {
+	// Store an independently parseable capture-time value, including nested
+	// references. Alias-only older journals remain pending because they lack a value.
+	if n != nil {
+		r.Resolved, err = hermesResolvedBytes(n)
+		if err != nil {
+			return s, err
+		}
 		var check yaml.Node
-		if err := yaml.Unmarshal(r.Value, &check); err != nil {
+		if err := yaml.Unmarshal(r.Resolved, &check); err != nil {
 			return s, ErrManagedCapture
 		}
 	}
@@ -378,15 +445,19 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 			}
 		}
 		if r.ParentAlias != "" {
-			return hermesRestoreAlias(t.Path, parts[:1], hermesRegion{Alias: r.ParentAlias, AliasHead: r.ParentAliasHead, AliasLine: r.ParentAliasLine, AliasFoot: r.ParentAliasFoot})
+			return hermesRestoreCapturedAlias(t.Path, parts[:1], hermesRegion{Alias: r.ParentAlias, AliasHead: r.ParentAliasHead, AliasLine: r.ParentAliasLine, AliasFoot: r.ParentAliasFoot, Resolved: r.ParentResolved})
 		}
 		return edit.SetYAML(t.Path, edit.KV{Path: parts[0], Value: edit.YAMLText(r.ParentValue)})
 	}
 	if s.Exists {
 		if r.Alias != "" {
-			return hermesRestoreAlias(t.Path, parts, r)
+			return hermesRestoreCapturedAlias(t.Path, parts, r)
 		}
-		return edit.SetYAML(t.Path, edit.KV{Path: t.Scope, Value: edit.YAMLText(r.Value)})
+		value := r.Value
+		if len(r.Resolved) != 0 {
+			value = r.Resolved
+		}
+		return edit.SetYAML(t.Path, edit.KV{Path: t.Scope, Value: edit.YAMLText(value)})
 	}
 	if err := edit.DelYAML(t.Path, t.Scope); err != nil {
 		return err
@@ -406,6 +477,107 @@ func hermesManagedRestoreRegion(t ManagedTarget, s ManagedSnapshot) error {
 		}
 	}
 	return nil
+}
+
+// Use the original reference only when it still resolves to the captured value.
+// Otherwise restore the independent value without altering the current anchor.
+func hermesRestoreCapturedAlias(path string, parts []string, r hermesRegion) error {
+	// Older alias-only journals lack the original value; rebinding one could
+	// silently restore a changed value, so keep it pending for recovery.
+	if len(r.Resolved) == 0 {
+		return ErrManagedRestore
+	}
+	raw, exists, _, err := hermesManagedRead(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrManagedRestore
+	}
+	root, err := hermesYAMLRoot(raw)
+	if err != nil {
+		return err
+	}
+	var anchor *yaml.Node
+	count := 0
+	var visit func(*yaml.Node)
+	visit = func(n *yaml.Node) {
+		if n.Anchor == r.Alias {
+			anchor = n
+			count++
+		}
+		for _, c := range n.Content {
+			visit(c)
+		}
+	}
+	visit(root)
+	if count == 1 {
+		var before, current any
+		if yaml.Unmarshal(r.Resolved, &before) == nil && anchor.Decode(&current) == nil && reflect.DeepEqual(before, current) {
+			if err := hermesRestoreAlias(path, parts, r); err == nil {
+				return nil
+			}
+		}
+	}
+	if err := edit.SetYAML(path, edit.KV{Path: strings.Join(parts, "."), Value: edit.YAMLText(r.Resolved)}); err != nil {
+		return err
+	}
+	// A managed write or an earlier restore attempt may have removed the
+	// reference's line comment. Restore it at the original key, never by
+	// attaching it to a neighbouring entry.
+	if r.AliasLine == "" {
+		return nil
+	}
+	raw, _, _, err = hermesManagedRead(path)
+	if err != nil {
+		return err
+	}
+	root, err = hermesYAMLRoot(raw)
+	if err != nil {
+		return err
+	}
+	parent := root
+	for _, part := range parts[:len(parts)-1] {
+		parent = hermesNode(parent, part)
+		if parent == nil || parent.Kind != yaml.MappingNode {
+			return ErrManagedRestore
+		}
+	}
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i].Value != parts[len(parts)-1] {
+			continue
+		}
+		key, value := parent.Content[i], parent.Content[i+1]
+		if key.LineComment == r.AliasLine || value.LineComment == r.AliasLine {
+			return nil
+		}
+		if key.LineComment != "" || value.LineComment != "" {
+			return ErrManagedRestore
+		}
+		if (value.Kind == yaml.MappingNode || value.Kind == yaml.SequenceNode) && value.Style&yaml.FlowStyle == 0 {
+			key.LineComment = r.AliasLine
+		} else {
+			value.LineComment = r.AliasLine
+		}
+		var out bytes.Buffer
+		enc := yaml.NewEncoder(&out)
+		enc.SetIndent(2)
+		if err := enc.Encode(root); err != nil {
+			return err
+		}
+		if err := enc.Close(); err != nil {
+			return err
+		}
+		result := out.Bytes()
+		if bytes.Contains(raw, []byte("\r\n")) {
+			result = bytes.ReplaceAll(result, []byte("\n"), []byte("\r\n"))
+		}
+		if _, err := hermesYAMLRoot(result); err != nil {
+			return err
+		}
+		return edit.WriteAtomic(path, result)
+	}
+	return ErrManagedRestore
 }
 
 // Restore an alias in the document that owns its anchor. Parsing the alias as
@@ -469,7 +641,11 @@ func hermesRestoreAlias(path string, parts []string, r hermesRegion) error {
 	if index >= 0 && contains(parent.Content[index]) {
 		return ErrManagedRestore
 	}
-	alias := &yaml.Node{Kind: yaml.AliasNode, Value: r.Alias, Alias: anchor, HeadComment: r.AliasHead, LineComment: r.AliasLine, FootComment: r.AliasFoot}
+	lineComment := r.AliasLine
+	if index >= 0 && parent.Content[index-1].LineComment == lineComment {
+		parent.Content[index-1].LineComment = ""
+	}
+	alias := &yaml.Node{Kind: yaml.AliasNode, Value: r.Alias, Alias: anchor, HeadComment: r.AliasHead, LineComment: lineComment, FootComment: r.AliasFoot}
 	if index >= 0 {
 		parent.Content[index] = alias
 	} else {
