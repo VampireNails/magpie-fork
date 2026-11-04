@@ -417,11 +417,29 @@ func (r *Runner) tick(ctx context.Context) time.Duration {
 		r.restorePending = false
 		r.offlineRestored = true
 	}
-	stored, err := r.client.Status(ctx)
+	// Include time spent waiting for storage in the same outage window.
+	// LockContext honors this deadline, so a contended lock cannot delay
+	// restoration by another full storage-lock timeout on each tick.
+	readStart := r.options.Now()
+	readBudget := r.options.Policy.OfflineWindow
+	if s.Connected && !r.offlineSince.IsZero() {
+		readBudget -= readStart.Sub(r.offlineSince)
+	}
+	if readBudget <= 0 {
+		// Give already-recovered storage a brief chance to report healthy
+		// before restoring, without waiting for the full lock timeout.
+		readBudget = 100 * time.Millisecond
+	}
+	readCtx, cancelRead := context.WithTimeout(ctx, readBudget)
+	stored, err := r.client.Status(readCtx)
+	cancelRead()
+	if ctx.Err() != nil {
+		return r.options.Policy.ProbeEvery
+	}
 	if err != nil {
 		now := r.options.Now()
 		if r.offlineSince.IsZero() {
-			r.offlineSince = now
+			r.offlineSince = readStart
 		}
 		if remaining := r.options.Policy.OfflineWindow - now.Sub(r.offlineSince); s.Connected && remaining > 0 {
 			s.State = "retrying"
