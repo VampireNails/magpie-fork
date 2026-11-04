@@ -3,6 +3,7 @@ package remotejoin
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 func TestRunnerLosingLocalConnectionStateClosesAndRestores(t *testing.T) {
@@ -20,6 +21,66 @@ func TestRunnerLosingLocalConnectionStateClosesAndRestores(t *testing.T) {
 	tickRunner(t, r)
 	if m.restored != 1 {
 		t.Fatalf("repeated recovery without new connection: %d", m.restored)
+	}
+}
+
+func TestRunnerMixedFailuresShareOfflineWindow(t *testing.T) {
+	for _, storageFirst := range []bool{false, true} {
+		name := "network-then-storage"
+		if storageFirst {
+			name = "storage-then-network"
+		}
+		t.Run(name, func(t *testing.T) {
+			r, m, now, health := runnerFixture(t)
+			tickRunner(t, r)
+			original, err := os.ReadFile(connectionPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if storageFirst {
+				if err := os.WriteFile(connectionPath(), []byte("invalid"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				*health = HealthResult{Code: "health_unreachable"}
+			}
+			tickRunner(t, r)
+			*now = now.Add(r.options.Policy.OfflineWindow - time.Second)
+			if storageFirst {
+				if err := os.WriteFile(connectionPath(), original, 0600); err != nil {
+					t.Fatal(err)
+				}
+				*health = HealthResult{Code: "health_unreachable"}
+			} else if err := os.WriteFile(connectionPath(), []byte("invalid"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if s := tickRunner(t, r); !s.Connected || m.restored != 0 {
+				t.Fatal("detached before window expired")
+			}
+			*now = now.Add(time.Second)
+			if s := tickRunner(t, r); s.Connected || m.connected || m.restored != 1 {
+				t.Fatalf("continuous failure exceeded window: state=%s connected=%v restores=%d", s.State, s.Connected, m.restored)
+			}
+		})
+	}
+}
+
+func TestRunnerHealthyProbeResetsMixedFailureWindow(t *testing.T) {
+	r, m, now, health := runnerFixture(t)
+	tickRunner(t, r)
+	*health = HealthResult{Code: "health_unreachable"}
+	tickRunner(t, r)
+	*now = now.Add(r.options.Policy.OfflineWindow - time.Second)
+	*health = HealthResult{Healthy: true, Reachable: true}
+	if s := tickRunner(t, r); !s.Connected || s.State != "connected" {
+		t.Fatal("health did not recover")
+	}
+	*now = now.Add(time.Second)
+	if err := os.WriteFile(connectionPath(), []byte("invalid"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if s := tickRunner(t, r); s.State != "retrying" || !s.Connected || m.restored != 0 {
+		t.Fatal("healthy probe did not reset window")
 	}
 }
 

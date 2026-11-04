@@ -54,7 +54,6 @@ type Runner struct {
 	restorePending    bool
 	offlineRestored   bool
 	offlineSince      time.Time
-	storageErrorSince time.Time
 	nextRegistration  time.Time
 	nextCatalog       time.Time
 	quiesced          bool
@@ -421,10 +420,10 @@ func (r *Runner) tick(ctx context.Context) time.Duration {
 	stored, err := r.client.Status(ctx)
 	if err != nil {
 		now := r.options.Now()
-		if r.storageErrorSince.IsZero() {
-			r.storageErrorSince = now
+		if r.offlineSince.IsZero() {
+			r.offlineSince = now
 		}
-		if remaining := r.options.Policy.OfflineWindow - now.Sub(r.storageErrorSince); s.Connected && remaining > 0 {
+		if remaining := r.options.Policy.OfflineWindow - now.Sub(r.offlineSince); s.Connected && remaining > 0 {
 			s.State = "retrying"
 			s.LastErrorCode = "connection_storage_unavailable"
 			r.publish(s)
@@ -439,7 +438,6 @@ func (r *Runner) tick(ctx context.Context) time.Duration {
 		r.publish(s)
 		return r.options.Policy.RestoreRetry
 	}
-	r.storageErrorSince = time.Time{}
 	s.ClientStatus = stored
 	if stored.ConnectionMode == "paused" {
 		s.State = "paused"
