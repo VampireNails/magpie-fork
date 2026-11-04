@@ -320,7 +320,35 @@ func hermesManagedRestoreStaged(t ManagedTarget, s ManagedSnapshot) error {
 		return err
 	}
 	var comments []string
+	// Notes inside the region being replaced belong to the removed wiring;
+	// the whole-line preservation fallback must not reattach them elsewhere.
+	ownedNotes := map[string]bool{}
 	if exists {
+		root, err := hermesYAMLRoot(raw)
+		if err != nil {
+			return err
+		}
+		n := root
+		for _, part := range strings.Split(t.Scope, ".") {
+			n = hermesNode(n, part)
+		}
+		var collectNotes func(*yaml.Node)
+		collectNotes = func(n *yaml.Node) {
+			if n == nil {
+				return
+			}
+			for _, comment := range []string{n.HeadComment, n.LineComment, n.FootComment} {
+				for _, line := range strings.Split(comment, "\n") {
+					if edit.IsNote(line) {
+						ownedNotes[strings.TrimSpace(line)] = true
+					}
+				}
+			}
+			for _, child := range n.Content {
+				collectNotes(child)
+			}
+		}
+		collectNotes(n)
 		for _, line := range strings.Split(string(raw), "\n") {
 			if strings.HasPrefix(strings.TrimSpace(line), "#") {
 				comments = append(comments, strings.TrimRight(line, "\r"))
@@ -345,7 +373,7 @@ func hermesManagedRestoreStaged(t ManagedTarget, s ManagedSnapshot) error {
 	for _, line := range comments {
 		if present[line] > 0 {
 			present[line]--
-		} else {
+		} else if !ownedNotes[strings.TrimSpace(line)] {
 			missing = append(missing, line)
 		}
 	}
@@ -1127,8 +1155,15 @@ func hermesMergeParentAlias(path string, root, current *yaml.Node, managed strin
 	if current.HeadComment == "" {
 		current.HeadComment = r.ParentAliasHead
 	}
-	if current.LineComment == "" {
-		current.LineComment = r.ParentAliasLine
+	// A block mapping's value comment can be emitted on the following key.
+	// Put the original inline alias comment on its parent key instead.
+	if current.LineComment == "" && r.ParentAliasLine != "" {
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			if root.Content[i+1] == current && root.Content[i].LineComment == "" {
+				root.Content[i].LineComment = r.ParentAliasLine
+				break
+			}
+		}
 	}
 	if current.FootComment == "" {
 		current.FootComment = r.ParentAliasFoot

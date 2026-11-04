@@ -506,3 +506,61 @@ func TestManagedHermesParentAliasMergeRetry(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedHermesAliasParentCommentOwnership(t *testing.T) {
+	oldMark := edit.Mark
+	edit.Mark = func(table, key, value string) string {
+		if table == "providers.magpie" && key == "base_url" {
+			return "managed gateway note"
+		}
+		return ""
+	}
+	t.Cleanup(func() { edit.Mark = oldMark })
+	home := managedEntryHome(t)
+	managedEntryConfigured(t)
+	a := hermes(home)
+	if err := os.MkdirAll(a.Dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	before := "shared: &saved\n  mine:\n    name: original\nproviders: *saved # parent baseline\nmodel:\n  default: original-model\n  provider: original\nother: keep # unrelated baseline\n"
+	if err := os.WriteFile(a.Path, []byte(before), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewManagedStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := entryLifecycleEnable(t, store)
+	t.Cleanup(func() { _ = m.Close() })
+	if err := a.Apply("model", "magpie/fixture/one"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := strings.Replace(string(raw), "name: original", "name: changed", 1)
+	s = strings.Replace(s, "providers: # parent baseline\n", "providers: # parent baseline\n  added: keep\n", 1)
+	if s == string(raw) || !strings.Contains(s, "added: keep") {
+		t.Fatalf("fixture setup: %s", s)
+	}
+	if err := os.WriteFile(a.Path, []byte(s), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Disconnect(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(a.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	if strings.Count(got, "# parent baseline") != 1 || !strings.Contains(got, "providers: # parent baseline") || strings.Contains(got, "# magpie:") || !strings.Contains(got, "other: keep # unrelated baseline") {
+		t.Errorf("comments moved, duplicated, or retained:\n%s", got)
+	}
+	for key, want := range map[string]string{"shared.mine.name": "changed", "providers.mine.name": "original", "providers.added": "keep", "model.default": "original-model", "model.provider": "original", "other": "keep"} {
+		if actual, _ := edit.GetYAML(a.Path, key); actual != want {
+			t.Errorf("%s = %q, want %q", key, actual, want)
+		}
+	}
+}
