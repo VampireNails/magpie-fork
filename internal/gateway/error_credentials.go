@@ -161,7 +161,7 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 			break
 		}
 		kind, _, _ := streamEvent(event)
-		if kind == eventError {
+		if kind == eventError || kind == eventRefusalError || kind == eventRefusal {
 			lines := bytes.SplitAfter(event, []byte("\n"))
 			for i, line := range lines {
 				if bytes.HasPrefix(line, []byte("data:")) {

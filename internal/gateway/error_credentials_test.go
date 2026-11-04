@@ -68,6 +68,37 @@ func TestFailureJSONKeyAndSplitStream(t *testing.T) {
 	}
 }
 
+func TestPolicyRefusalStreamDoesNotExposeProviderCredential(t *testing.T) {
+	fresh(t)
+	const key = "synthetic-policy-secret-9304"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"c\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		_, _ = w.Write([]byte("data: {\"error\":{\"code\":\"bio_policy\",\"message\":\"filtered " + key + "\"}}\n\n"))
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: key, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "hello") || strings.Contains(rec.Body.String(), key) {
+		t.Fatal("policy error failed to preserve content or exposed the provider credential")
+	}
+}
+
+func TestRefusalDetailDoesNotExposeCredential(t *testing.T) {
+	const key = "synthetic-refusal-secret-1947"
+	input := "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"message\":\"" + key + "\"}}}\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{key}}
+	out, err := io.ReadAll(reader)
+	if err != nil || strings.Contains(string(out), key) || !strings.Contains(string(out), "[redacted]") {
+		t.Fatal("refusal detail exposed the credential")
+	}
+}
+
 func TestErrorStreamPassesStandaloneKeepalive(t *testing.T) {
 	r, w := io.Pipe()
 	defer r.Close()
