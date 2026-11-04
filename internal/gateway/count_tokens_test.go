@@ -50,9 +50,9 @@ func TestCountTokensUpstreamErrors(t *testing.T) {
 				f.ServeHTTP(w, r)
 			}))
 			t.Cleanup(up.Close)
-			p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"m1"}, Anthropic: up.URL}
+			p := provider.Provider{ID: "fake", Name: "Fake", Key: "synthetic-key-fixture-long", Models: []string{"m1"}, Anthropic: up.URL}
 			if tc.status != 429 {
-				p.Keys = []provider.KeyAccount{{Key: "spare"}} // real errors must not try another key
+				p.Keys = []provider.KeyAccount{{Key: "synthetic-spare-fixture-long"}} // real errors must not try another key
 			}
 			if err := provider.Save(p); err != nil {
 				t.Fatal(err)
@@ -235,6 +235,14 @@ func TestCountTokensKeyFailover(t *testing.T) {
 func TestCountTokensTransportError(t *testing.T) {
 	up := setup(t, provider.Anthropic, &fake{})
 	up.Close()
+	p, err := provider.Find("fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Key = "synthetic-key-fixture-long"
+	if err = provider.Save(*p); err != nil {
+		t.Fatal(err)
+	}
 	code, body := post(t, "/v1/messages/count_tokens", `{"model":"fake/m1","messages":[{"role":"user","content":"hello"}]}`)
 	var result struct {
 		Type  string

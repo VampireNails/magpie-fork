@@ -47,7 +47,7 @@ func TestFailedRequestKeepsWhatTheVendorSaid(t *testing.T) {
 				w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down, please"}}`))
 			}))
 			t.Cleanup(up.Close)
-			p := provider.Provider{ID: "fake", Name: "Fake", Key: "k", Models: []string{"sol"}}
+			p := provider.Provider{ID: "fake", Name: "Fake", Key: "synthetic-key-fixture-long", Models: []string{"sol"}}
 			if c.vendor == provider.Chat {
 				p.Chat = up.URL + "/v1"
 			} else {

@@ -1648,7 +1648,7 @@ func (s *Server) countOn(w http.ResponseWriter, r *http.Request, p provider.Prov
 					continue
 				}
 			}
-			writeError(w, provider.Anthropic, 502, c.p.Name+": "+err.Error())
+			writeError(w, provider.Anthropic, 502, hideFailureSecrets(c.p.Name+": "+err.Error(), failureSecrets(c.p, r.Header)))
 			return
 		}
 		if res.StatusCode >= 400 {
@@ -1665,7 +1665,15 @@ func (s *Server) countOn(w http.ResponseWriter, r *http.Request, p provider.Prov
 			}
 			keepRetryOut(w.Header(), res.Header, b)
 			passReplyHeaders(w.Header(), c.p, res)
-			writeError(w, provider.Anthropic, res.StatusCode, c.p.Explain(c.p.Name+": "+provider.APIError(b, res.Status), res.StatusCode, b))
+			secrets := failureSecrets(c.p, r.Header)
+			for name, values := range w.Header() {
+				for i := range values {
+					values[i] = hideFailureSecrets(values[i], secrets)
+				}
+				w.Header()[name] = values
+			}
+			msg := c.p.Explain(c.p.Name+": "+provider.APIError(b, res.Status), res.StatusCode, b)
+			writeError(w, provider.Anthropic, res.StatusCode, hideFailureSecrets(msg, secrets))
 			return
 		}
 		defer res.Body.Close()

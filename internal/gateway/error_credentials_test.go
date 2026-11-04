@@ -89,6 +89,30 @@ func TestPolicyRefusalStreamDoesNotExposeProviderCredential(t *testing.T) {
 	}
 }
 
+func TestCountTokensErrorDoesNotExposeProviderCredential(t *testing.T) {
+	fresh(t)
+	const key = "synthetic-count-provider-key-3911"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages/count_tokens" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Request-Id", key)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"type":"authentication_error","message":"invalid credential ` + key + `"}}`))
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: key, Anthropic: up.URL, Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/messages/count_tokens", strings.NewReader(`{"model":"fixture/test","messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized || strings.Contains(rec.Body.String(), key) || strings.Contains(rec.Header().Get("Request-Id"), key) {
+		t.Fatalf("count_tokens leaked a provider credential or returned wrong status: status=%d, leaked=%t", rec.Code, strings.Contains(rec.Body.String(), key))
+	}
+}
+
 func TestRefusalDetailDoesNotExposeCredential(t *testing.T) {
 	const key = "synthetic-refusal-secret-1947"
 	input := "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\",\"stop_details\":{\"message\":\"" + key + "\"}}}\n\n"
@@ -152,10 +176,18 @@ func TestUpstreamErrorDoesNotExposeProviderCredential(t *testing.T) {
 }
 
 func TestHideFailureBodyPreservesJSONStructure(t *testing.T) {
-	input := []byte(`{"error":{"message":"key is a","code":"api_error"},"count":12345678901234567890}`)
-	got := hideFailureBody(input, []string{"a"})
+	input := []byte(`{"error":{"message":"key is synthetic-long-secret","code":"api_error"},"count":12345678901234567890}`)
+	got := hideFailureBody(input, []string{"synthetic-long-secret"})
 	if !json.Valid(got) || !strings.Contains(string(got), `"message"`) || !strings.Contains(string(got), `12345678901234567890`) || !strings.Contains(string(got), "[redacted]") {
 		t.Fatalf("JSON error structure was not preserved: %s", got)
+	}
+}
+
+func TestShortCredentialWithholdsEmbeddedText(t *testing.T) {
+	for _, msg := range []string{"invalid key k", "prefixksuffix"} {
+		if got := hideFailureSecrets(msg, []string{"k"}); got != "" {
+			t.Fatalf("short credential in ambiguous text was not withheld: %q", got)
+		}
 	}
 }
 

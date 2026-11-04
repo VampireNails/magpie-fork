@@ -37,6 +37,9 @@ func hideFailureSecrets(s string, secrets []string) string {
 		encoded, _ := json.Marshal(secret)
 		for _, value := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret), string(encoded[1 : len(encoded)-1])} {
 			if value != "" {
+				if len(value) < 8 && strings.Contains(s, value) {
+					return ""
+				}
 				s = strings.ReplaceAll(s, value, "[redacted]")
 			}
 		}
@@ -70,13 +73,13 @@ func hideFailureBody(body []byte, secrets []string) []byte {
 			for k, item := range v {
 				name := k
 				for _, secret := range secrets {
-					if secret != "" && (k == secret || len(secret) >= 8 && strings.Contains(k, secret)) {
+					if secret != "" && strings.Contains(k, secret) {
 						name = hideFailureSecrets(name, []string{secret})
 					}
 				}
 				changed = changed || name != k
 				if _, exists := out[name]; exists {
-					return "[redacted]"
+					return nil
 				}
 				out[name] = scrub(item)
 			}

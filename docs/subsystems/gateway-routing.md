@@ -6,6 +6,11 @@ returned or recorded in usage and routing. SSE errors are read one event at a
 time so a key split over network reads is not released; an event over 4 MiB is
 stopped with a generic error. This does not guarantee removal of unknown
 credentials or cover other diagnostic and protocol paths.
+An error field containing a very short key (under eight bytes) is withheld in
+full: matching that key inside a word is ambiguous, but leaving it could expose
+the credential. This can suppress harmless diagnostics when such a key is set.
+Token-counting upstream errors apply the same known-credential filter to the
+error text and forwarded headers before returning them to the client.
 
 The gateway is magpie's local LLM endpoint (`127.0.0.1:3425` by default). It
 serves Chat Completions, Responses, Anthropic Messages and Gemini. It finds
