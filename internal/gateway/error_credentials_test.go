@@ -183,10 +183,17 @@ func TestHideFailureBodyPreservesJSONStructure(t *testing.T) {
 	}
 }
 
-func TestShortCredentialWithholdsEmbeddedText(t *testing.T) {
-	for _, msg := range []string{"invalid key k", "prefixksuffix"} {
-		if got := hideFailureSecrets(msg, []string{"k"}); got != "" {
-			t.Fatalf("short credential in ambiguous text was not withheld: %q", got)
+func TestShortCredentialRedactsWholeTokensOnly(t *testing.T) {
+	cases := map[string]string{
+		"invalid key k":     "invalid key [redacted]",
+		"key=k, retry":      "key=[redacted], retry",
+		"k":                 "[redacted]",
+		"prefixksuffix":     "prefixksuffix",
+		"magpie-grok: down": "magpie-grok: down",
+	}
+	for in, want := range cases {
+		if got := hideFailureSecrets(in, []string{"k"}); got != want {
+			t.Fatalf("short credential redaction of %q = %q, want %q", in, got, want)
 		}
 	}
 }

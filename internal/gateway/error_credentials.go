@@ -36,15 +36,52 @@ func hideFailureSecrets(s string, secrets []string) string {
 		}
 		encoded, _ := json.Marshal(secret)
 		for _, value := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret), string(encoded[1 : len(encoded)-1])} {
-			if value != "" {
-				if len(value) < 8 && strings.Contains(s, value) {
-					return ""
-				}
-				s = strings.ReplaceAll(s, value, "[redacted]")
+			if value == "" {
+				continue
 			}
+			s = hideOneSecret(s, value)
 		}
 	}
 	return s
+}
+
+// hideOneSecret removes a credential from text. A real credential is replaced
+// wherever it appears. A value too short to be told from prose (fewer than 8
+// characters) is replaced only where it stands alone: withholding the whole
+// message when a character happened to appear lost the vendor's own words
+// (#248's refusal advice), and replacing it inside them mangled them
+// ("magpie-gro[redacted]").
+func hideOneSecret(s, value string) string {
+	if len(value) >= 8 {
+		return strings.ReplaceAll(s, value, "[redacted]")
+	}
+	var b strings.Builder
+	for {
+		i := strings.Index(s, value)
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		before, after := byte(0), byte(0)
+		if i > 0 {
+			before = s[i-1]
+		}
+		if i+len(value) < len(s) {
+			after = s[i+len(value)]
+		}
+		if !wordByte(before) && !wordByte(after) {
+			b.WriteString(s[:i])
+			b.WriteString("[redacted]")
+			s = s[i+len(value):]
+			continue
+		}
+		b.WriteString(s[:i+len(value)])
+		s = s[i+len(value):]
+	}
+}
+
+func wordByte(c byte) bool {
+	return c == '_' || '0' <= c && c <= '9' || 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
 }
 
 // Error replies are normally JSON. Redact its string values without altering
