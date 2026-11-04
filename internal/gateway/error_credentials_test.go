@@ -322,3 +322,83 @@ func TestGatewayFailureStreamMetadataCredential(t *testing.T) {
 		t.Fatal("gateway error stream exposed provider credential in metadata")
 	}
 }
+
+func TestGatewayShortCredentialPreservesErrorProtocol(t *testing.T) {
+	fresh(t)
+	const secret = "or"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid credential or"}}`)
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	var reply struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reply); err != nil || reply.Error.Type != "authentication_error" || reply.Error.Message == "" || strings.Contains(reply.Error.Message, secret) {
+		t.Fatalf("gateway error protocol damaged or dynamic credential exposed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGatewayLongSSECommentDoesNotExposeCredential(t *testing.T) {
+	fresh(t)
+	const secret = "synthetic-long-comment-secret-7938"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, ": "+strings.Repeat("x", 5000)+secret+"\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"world\"}}]}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), secret) || !strings.Contains(rec.Body.String(), "world") {
+		t.Fatal("long SSE comment exposed credential or interrupted normal content")
+	}
+}
+
+func TestFailureStreamShortCredentialPreservesErrorEvent(t *testing.T) {
+	const secret = "or"
+	input := "event: error\ndata: {\"error\":{\"message\":\"invalid credential or\"}}\n\n"
+	reader := &upstreamErrorStream{body: io.NopCloser(strings.NewReader(input)), reader: bufio.NewReader(strings.NewReader(input)), secrets: []string{secret}}
+	out, err := io.ReadAll(reader)
+	if err != nil || !strings.Contains(string(out), "event: error\n") || !strings.Contains(string(out), `"error"`) || strings.Contains(string(out), "credential or") {
+		t.Fatalf("SSE error protocol damaged or dynamic credential exposed: %s", out)
+	}
+}
+
+func TestGatewayShortCredentialPreservesSSEErrorProtocol(t *testing.T) {
+	fresh(t)
+	const secret = "or"
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "event: error\ndata: {\"error\":{\"message\":\"invalid credential or\"}}\n\n")
+	}))
+	defer up.Close()
+	if err := provider.Save(provider.Provider{ID: "fixture", Name: "Fixture", Key: secret, Chat: up.URL + "/v1", Models: []string{"test"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"fixture/test","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+	New().Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, "event: error\n") || !strings.Contains(body, `"error"`) || strings.Contains(body, "credential or") {
+		t.Fatalf("gateway SSE error protocol damaged or dynamic credential exposed: %s", body)
+	}
+}

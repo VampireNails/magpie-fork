@@ -129,12 +129,19 @@ func hideFailureBody(body []byte, secrets []string) []byte {
 		case map[string]any:
 			out := make(map[string]any, len(v))
 			for k, item := range v {
-				name := hideFailureSecrets(k, secrets)
+				name := k
+				if !errorProtocolField(k) {
+					name = hideFailureSecrets(k, secrets)
+				}
 				changed = changed || name != k
 				if _, exists := out[name]; exists {
 					return nil
 				}
-				out[name] = scrub(item)
+				if k == "type" && errorProtocolType(item) {
+					out[name] = item
+				} else {
+					out[name] = scrub(item)
+				}
 			}
 			return out
 		}
@@ -149,6 +156,28 @@ func hideFailureBody(body []byte, secrets []string) []byte {
 		return []byte(`{"error":{"message":"Upstream error details withheld"}}`)
 	}
 	return out
+}
+
+// These are protocol field names, not dynamic upstream messages or keys.
+// Mutating them makes clients unable to decode the error.
+func errorProtocolField(name string) bool {
+	switch name {
+	case "error", "message", "type", "code", "param", "status", "response", "id", "object", "choices", "delta", "index", "finish_reason", "stop_reason", "stop_details", "content_block", "content", "text", "refusal", "usage", "request_id":
+		return true
+	}
+	return false
+}
+
+func errorProtocolType(value any) bool {
+	s, ok := value.(string)
+	if !ok {
+		return false
+	}
+	switch s {
+	case "error", "response.failed", "invalid_request_error", "authentication_error", "permission_error", "not_found_error", "rate_limit_error", "api_error", "overloaded_error", "billing_error", "server_error":
+		return true
+	}
+	return false
 }
 
 // Keep the upstream's known credentials with its body so eventStream can
@@ -182,13 +211,11 @@ type upstreamErrorStream struct {
 func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 	for len(s.pending) == 0 && !s.done {
 		var event []byte
+		comment := false
 		for {
 			part, err := s.reader.ReadSlice('\n')
-			// A standalone SSE comment is a keepalive even without an empty
-			// line (another Magpie sends these while a request is queued).
-			if len(event) == 0 && err == nil && bytes.HasPrefix(part, []byte(":")) {
-				s.pending = []byte(hideFailureSecrets(string(part), s.secrets))
-				break
+			if len(event) == 0 {
+				comment = bytes.HasPrefix(part, []byte(":"))
 			}
 			event = append(event, part...)
 			if len(event) > 4<<20 {
@@ -198,6 +225,13 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 			}
 			if err == bufio.ErrBufferFull {
 				continue
+			}
+			// A standalone SSE comment is a keepalive even without an empty
+			// line. Buffer the complete line before masking, including lines
+			// longer than the bufio reader's buffer.
+			if comment && err == nil {
+				s.pending = []byte(hideFailureSecrets(string(event), s.secrets))
+				break
 			}
 			if err != nil {
 				s.done = true
@@ -216,6 +250,15 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 		if len(event) == 0 {
 			break
 		}
+		// Comments attached to an ordinary event are not error payloads, but
+		// are still upstream metadata and may contain a credential.
+		parts := bytes.SplitAfter(event, []byte("\n"))
+		for i, line := range parts {
+			if bytes.HasPrefix(line, []byte(":")) {
+				parts[i] = []byte(hideFailureSecrets(string(line), s.secrets))
+			}
+		}
+		event = bytes.Join(parts, nil)
 		kind, _, _ := streamEvent(event)
 		namedError := false
 		for _, line := range bytes.Split(event, []byte("\n")) {
@@ -237,6 +280,12 @@ func (s *upstreamErrorStream) Read(p []byte) (int, error) {
 					payload := bytes.TrimSpace(line[len("data:"):])
 					lines[i] = append(append([]byte("data: "), hideFailureBody(payload, s.secrets)...), ending...)
 				} else if colon := bytes.IndexByte(line, ':'); colon >= 0 {
+					if bytes.Equal(line[:colon], []byte("event")) {
+						name := strings.TrimSpace(string(line[colon+1:]))
+						if name == "error" || name == "response.failed" {
+							continue
+						}
+					}
 					// SSE metadata (including comments and IDs) can also carry
 					// a credential in an upstream error.
 					lines[i] = append(append([]byte(nil), line[:colon+1]...), []byte(hideFailureSecrets(string(line[colon+1:]), s.secrets))...)
