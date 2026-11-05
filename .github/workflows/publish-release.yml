@@ -1,0 +1,147 @@
+name: Publish release
+
+# Builds the Windows desktop app and publishes it as a GitHub Release, so
+# the release app on every machine can update itself by clicking. This is
+# the fork's own channel: the upstream release.yml hands off to
+# yetone/magpie-releases, which this repo neither owns nor can reach, so a
+# self-contained build lives here instead.
+#
+# Two ways a release goes out:
+#   * push to main that touches Go source / the Windows resources — a new
+#     patch version is chosen automatically (the latest release's patch + 1);
+#   * workflow_dispatch, with an exact version for a minor/major bump or a
+#     re-release.
+#
+# The release carries two assets:
+#   * magpie-windows-amd64.exe — the app itself;
+#   * api-latest.json — the update feed. Its stable address is
+#     https://github.com/<owner>/<repo>/releases/latest/download/api-latest.json
+#     (GitHub's "latest release" always redirects to the newest one), which
+#     is what the release app's MAGPIE_UPDATE_FEED points at. No GitHub Pages
+#     or extra branch is needed.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'build/windows/**'
+      - '.github/workflows/publish-release.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 3.3.2). Leave empty to auto-bump the patch from the latest release.'
+        required: false
+        type: string
+
+# A newer push supersedes a release that hasn't finished, so two quick
+# pushes don't publish two half-overlapping versions.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # to create the tag, the release and its assets
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            # The newest release's tag, or 3.3.1 when none is out yet (the
+            # version the local desktop/ was first shipped with).
+            latest="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
+            latest="${latest#v}"
+            if [ -z "$latest" ]; then latest="3.3.1"; fi
+            VERSION="$(printf '%s' "$latest" | awk -F. '{print $1"."$2"."($3+1)}')"
+          fi
+          # A version is three numbers (3.3.2); nothing else. The app's
+          # update code only treats a strict x.y.z as a released build.
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "bad version: $VERSION (want x.y.z, e.g. 3.3.2)" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing magpie $VERSION"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Windows resource (icon, version, DPI manifest)
+        run: |
+          WINVER="${{ steps.version.outputs.version }}"
+          go run github.com/tc-hib/go-winres@v0.3.3 make --in build/windows/winres.json --arch amd64 --out rsrc \
+            --file-version "$WINVER" --product-version "$WINVER"
+
+      - name: Build the launcher (amd64)
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -buildvcs=false \
+            -ldflags="-s -w" -o internal/update/launcher-amd64.com ./internal/update/launcher
+
+      - name: Build the Windows desktop app
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 go build -tags production,comlauncher -trimpath -buildvcs=false \
+            -ldflags="-s -w -X main.version=$VERSION -H windowsgui" \
+            -o dist/magpie-windows-amd64.exe .
+
+      - name: Generate the update feed
+        id: feed
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          REPO: ${{ github.repository }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          SIZE="$(stat -c%s dist/magpie-windows-amd64.exe)"
+          SHA256="$(sha256sum dist/magpie-windows-amd64.exe | cut -d' ' -f1)"
+          NOTES="${COMMIT_MSG:-magpie $VERSION}"
+          mkdir -p feed
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg url "https://github.com/$REPO/releases/tag/$TAG" \
+            --arg asset_url "https://github.com/$REPO/releases/download/$TAG/magpie-windows-amd64.exe" \
+            --argjson size "$SIZE" \
+            --arg sha256 "$SHA256" \
+            '{version: $version, notes: $notes, url: $url, assets: {"magpie-windows-amd64.exe": {url: $asset_url, size: $size, sha256: $sha256}}}' \
+            > feed/api-latest.json
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+          echo "Feed for $VERSION:"
+          cat feed/api-latest.json
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          NOTES="${{ github.event.head_commit.message }}"
+          [ -z "$NOTES" ] && NOTES="magpie $VERSION"
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "magpie $VERSION" \
+            --notes "$NOTES" \
+            dist/magpie-windows-amd64.exe
+          gh release upload "$TAG" feed/api-latest.json --clobber
+          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          echo "Feed: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/api-latest.json"
