@@ -127,7 +127,7 @@ func managedShape(fields map[string]json.RawMessage) bool {
 		if !ok || !managedAllowed(f, "baseline", "finalized", "errorCode") {
 			return false
 		}
-		if b, ok := managedFields(f["baseline"], "path", "exists", "mode"); !ok || !managedAllowed(b, "path", "exists", "mode") {
+		if b, ok := managedFields(f["baseline"], "path", "exists", "mode"); !ok || !managedAllowed(b, "path", "exists", "mode", "original") {
 			return false
 		}
 	}
@@ -357,7 +357,12 @@ func managedAdd(j *managedJournal, a ManagedAdapter, targets []ManagedTarget) er
 			}
 		}
 		if !fileSeen {
-			j.Files = append(j.Files, managedFile{Baseline: ManagedFileBaseline{Path: t.Path, Exists: snap.FileExists, Mode: snap.Mode}})
+			j.Files = append(j.Files, managedFile{Baseline: ManagedFileBaseline{
+				Path:     t.Path,
+				Exists:   snap.FileExists,
+				Mode:     snap.Mode,
+				Original: originalBytes(t.Path, snap.FileExists),
+			}})
 		}
 		j.Targets = append(j.Targets, managedEntry{Target: t, Snapshot: &snap})
 	}

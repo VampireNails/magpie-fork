@@ -695,6 +695,12 @@ func (r *Runner) Connect(ctx context.Context, raw string) (RunnerStatus, error) 
 		}
 		s.State = "connecting"
 		s.LastErrorCode = "registration_failed"
+		// Keep the client's precise reason (rejected, unreachable, bad
+		// certificate...) so the page can say what went wrong instead of
+		// "an operation failed".
+		if st, e := r.client.Status(ctx); e == nil && st.LastErrorCode != "" {
+			s.LastErrorCode = st.LastErrorCode
+		}
 		r.publish(s)
 		return s, errors.New("connection_failed")
 	}

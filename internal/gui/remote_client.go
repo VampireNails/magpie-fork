@@ -119,7 +119,7 @@ func remoteBody(w http.ResponseWriter, r *http.Request, out any) bool {
 func remoteStatus(w http.ResponseWriter, s remoteClientStatus, err error) {
 	if err != nil {
 		switch s.ErrorCode {
-		case "OWNER_CONFLICT", "RESTORE_FAILED", "registration_request_invalid", "tailscale_tool_unavailable", "tailscale_status_unavailable", "tailscale_mapping_unavailable", "tls_certificate_invalid", "dns_resolution_failed", "registration_timeout", "registration_unreachable", "registration_rejected", "registration_response_invalid", "provider_binding_failed", "model_refresh_failed":
+		case "OWNER_CONFLICT", "RESTORE_FAILED", "registration_request_invalid", "tailscale_tool_unavailable", "tailscale_status_unavailable", "tailscale_mapping_unavailable", "tls_certificate_invalid", "dns_resolution_failed", "registration_timeout", "registration_unreachable", "registration_rejected", "registration_response_invalid", "registration_failed", "connection_storage_unavailable", "provider_binding_failed", "model_refresh_failed":
 			remoteError(w, 503, s.ErrorCode)
 		default:
 			remoteError(w, 503, "UNAVAILABLE")
@@ -138,7 +138,7 @@ func remoteStatus(w http.ResponseWriter, s remoteClientStatus, err error) {
 		s.RecoveryTarget = ""
 	}
 	switch s.ErrorCode {
-	case "", "OWNER_CONFLICT", "RESTORE_FAILED", "UNAVAILABLE", "registration_request_invalid", "tailscale_tool_unavailable", "tailscale_status_unavailable", "tailscale_mapping_unavailable", "tls_certificate_invalid", "dns_resolution_failed", "registration_timeout", "registration_unreachable", "registration_rejected", "registration_response_invalid", "provider_binding_failed", "model_refresh_failed":
+	case "", "OWNER_CONFLICT", "RESTORE_FAILED", "UNAVAILABLE", "registration_request_invalid", "tailscale_tool_unavailable", "tailscale_status_unavailable", "tailscale_mapping_unavailable", "tls_certificate_invalid", "dns_resolution_failed", "registration_timeout", "registration_unreachable", "registration_rejected", "registration_response_invalid", "registration_failed", "connection_storage_unavailable", "provider_binding_failed", "model_refresh_failed":
 	default:
 		s.ErrorCode = "UNAVAILABLE"
 	}

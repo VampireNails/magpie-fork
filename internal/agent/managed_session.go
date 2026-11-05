@@ -35,10 +35,14 @@ type ManagedAdapter struct {
 }
 
 // ManagedFileBaseline retains the file state seen before its first region was written.
+// Original keeps those exact bytes: a region restore puts the values back, but a
+// YAML or JSON re-encode can still change the file's formatting, and "restored"
+// has to mean the file the user had.
 type ManagedFileBaseline struct {
-	Path   string `json:"path"`
-	Exists bool   `json:"exists"`
-	Mode   uint32 `json:"mode"`
+	Path     string `json:"path"`
+	Exists   bool   `json:"exists"`
+	Mode     uint32 `json:"mode"`
+	Original []byte `json:"original,omitempty"`
 }
 
 type ManagedPhase string

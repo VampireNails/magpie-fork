@@ -728,7 +728,10 @@ func hermesManagedFinalize(f ManagedFileBaseline) error {
 		}
 	}
 	if f.Exists {
-		return hermesManagedEdit(f.Path, func(p string) error { return os.Chmod(p, os.FileMode(f.Mode)) })
+		if err := hermesManagedEdit(f.Path, func(p string) error { return os.Chmod(p, os.FileMode(f.Mode)) }); err != nil {
+			return err
+		}
+		return restoreOriginalBytes(f, hermesSameDocument)
 	}
 	return nil
 }

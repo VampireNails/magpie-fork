@@ -51,7 +51,21 @@ if (window.bootPrefs?.remoteClient === true) {
       paused: "Remote connection: Paused", "restore-failed": "Remote connection: Restoration incomplete", unknown: "Remote connection: Status unknown",
     };
     const say = key => { const value = t(key); return value.startsWith("Remote connection: ") ? value.slice(19) : value; };
-    const message = code => code === "RESTORE_FAILED" ? "Remote connection: Restoration incomplete" : code === "model_refresh_failed" ? "Remote connection: Model refresh failed" : ["registration_timeout", "registration_unreachable", "dns_resolution_failed"].includes(code) ? "Remote connection: Server could not be reached" : "Remote connection: An operation failed. Try again.";
+    // A failed connect has to say what went wrong: the runner keeps the
+    // client's precise reason, so name it instead of "an operation failed".
+    const failures = {
+      RESTORE_FAILED: "Remote connection: Restoration incomplete",
+      model_refresh_failed: "Remote connection: Model refresh failed",
+      registration_rejected: "Remote connection: Server refused this device",
+      registration_request_invalid: "Remote connection: Server rejected the registration request",
+      registration_response_invalid: "Remote connection: Server replied with something unexpected",
+      tls_certificate_invalid: "Remote connection: Server certificate is not trusted",
+      provider_binding_failed: "Remote connection: Server models could not be bound",
+      connection_storage_unavailable: "Remote connection: Connection state could not be saved",
+      OWNER_CONFLICT: "Remote connection: Another magpie is already running",
+    };
+    const unreachable = ["registration_timeout", "registration_unreachable", "dns_resolution_failed", "registration_failed"];
+    const message = code => failures[code] || (unreachable.includes(code) ? "Remote connection: Server could not be reached" : "Remote connection: An operation failed. Try again.");
     function paint() {
       const q = id => page.querySelector("#" + id);
       q("remoteCurrent").textContent = status?.serverUrl || "";
@@ -80,6 +94,11 @@ if (window.bootPrefs?.remoteClient === true) {
     }
     async function act(action) {
       if (busy || reading) return;
+      if (action === "connect" && !page.querySelector("#remoteAddress").value.trim()) {
+        notice = "Remote connection: Enter a server address first";
+        paint();
+        return;
+      }
       busy = true; revision++; notice = ""; paint();
       try {
         if (action === "manage") {

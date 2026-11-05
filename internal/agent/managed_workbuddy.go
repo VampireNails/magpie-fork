@@ -161,7 +161,10 @@ func ManagedWorkBuddy(a *Agent) (ManagedAdapter, []ManagedTarget, error) {
 		if !baseline.Exists {
 			return removeManagedWorkBuddy(baseline.Path)
 		}
-		return os.Chmod(baseline.Path, os.FileMode(baseline.Mode))
+		if err := os.Chmod(baseline.Path, os.FileMode(baseline.Mode)); err != nil {
+			return err
+		}
+		return restoreOriginalBytes(baseline, workbuddySameModels)
 	}
 	return adapter, []ManagedTarget{target}, nil
 }
