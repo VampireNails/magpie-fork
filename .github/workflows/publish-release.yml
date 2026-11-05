@@ -1,10 +1,14 @@
 name: Publish release
 
-# Builds the Windows desktop app and publishes it as a GitHub Release, so
-# the release app on every machine can update itself by clicking. This is
-# the fork's own channel: the upstream release.yml hands off to
-# yetone/magpie-releases, which this repo neither owns nor can reach, so a
-# self-contained build lives here instead.
+# Builds the Windows desktop app and publishes it as a GitHub Release in
+# the public RELEASES_REPO, so the release app on every machine can update
+# itself by clicking.
+#
+# This source repo can stay PRIVATE: the build happens here, but the
+# binaries and the update feed are published to a separate public repo,
+# which is the only place clients ever read from. The publish step uses a
+# PAT (secrets.RELEASES_REPO_TOKEN) that has write access to that public
+# repo; the source repo's own GITHUB_TOKEN can't reach it.
 #
 # Two ways a release goes out:
 #   * push to main that touches Go source / the Windows resources — a new
@@ -12,10 +16,10 @@ name: Publish release
 #   * workflow_dispatch, with an exact version for a minor/major bump or a
 #     re-release.
 #
-# The release carries two assets:
+# Each release carries two assets in RELEASES_REPO:
 #   * magpie-windows-amd64.exe — the app itself;
 #   * api-latest.json — the update feed. Its stable address is
-#     https://github.com/<owner>/<repo>/releases/latest/download/api-latest.json
+#     https://github.com/<owner>/<releases-repo>/releases/latest/download/api-latest.json
 #     (GitHub's "latest release" always redirects to the newest one), which
 #     is what the release app's MAGPIE_UPDATE_FEED points at. No GitHub Pages
 #     or extra branch is needed.
@@ -42,8 +46,15 @@ concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: true
 
+# The source repo is only read (checkout + build). Releases go to the
+# public RELEASES_REPO through the PAT, so nothing here needs write access.
 permissions:
-  contents: write # to create the tag, the release and its assets
+  contents: read
+
+env:
+  # The public repo that holds every release and the update feed. Clients
+  # download from here anonymously; this source repo can stay private.
+  RELEASES_REPO: VampireNails/magpie-releases
 
 jobs:
   publish:
@@ -55,15 +66,14 @@ jobs:
         id: version
         env:
           INPUT_VERSION: ${{ github.event.inputs.version }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ -n "$INPUT_VERSION" ]; then
             VERSION="$INPUT_VERSION"
           else
-            # The newest release's tag, or 3.3.1 when none is out yet (the
-            # version the local desktop/ was first shipped with).
-            latest="$(gh release list --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null || true)"
-            latest="${latest#v}"
+            # The newest release's tag in the public releases repo, or 3.3.1
+            # when none is out yet (the version desktop/ first shipped with).
+            # Asked anonymously: the releases repo is public.
+            latest="$(curl -s https://api.github.com/repos/$RELEASES_REPO/releases/latest | jq -r '.tag_name // empty' | sed 's/^v//')"
             if [ -z "$latest" ]; then latest="3.3.1"; fi
             VERSION="$(printf '%s' "$latest" | awk -F. '{print $1"."$2"."($3+1)}')"
           fi
@@ -75,7 +85,7 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Releasing magpie $VERSION"
+          echo "Releasing magpie $VERSION into $RELEASES_REPO"
 
       - uses: actions/setup-go@v5
         with:
@@ -108,7 +118,6 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
-          REPO: ${{ github.repository }}
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           SIZE="$(stat -c%s dist/magpie-windows-amd64.exe)"
@@ -118,8 +127,8 @@ jobs:
           jq -n \
             --arg version "$VERSION" \
             --arg notes "$NOTES" \
-            --arg url "https://github.com/$REPO/releases/tag/$TAG" \
-            --arg asset_url "https://github.com/$REPO/releases/download/$TAG/magpie-windows-amd64.exe" \
+            --arg url "https://github.com/$RELEASES_REPO/releases/tag/$TAG" \
+            --arg asset_url "https://github.com/$RELEASES_REPO/releases/download/$TAG/magpie-windows-amd64.exe" \
             --argjson size "$SIZE" \
             --arg sha256 "$SHA256" \
             '{version: $version, notes: $notes, url: $url, assets: {"magpie-windows-amd64.exe": {url: $asset_url, size: $size, sha256: $sha256}}}' \
@@ -129,19 +138,19 @@ jobs:
           echo "Feed for $VERSION:"
           cat feed/api-latest.json
 
-      - name: Publish the release
+      - name: Publish to the releases repo
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           NOTES="${{ github.event.head_commit.message }}"
           [ -z "$NOTES" ] && NOTES="magpie $VERSION"
           gh release create "$TAG" \
-            --target "$GITHUB_SHA" \
+            -R "$RELEASES_REPO" \
             --title "magpie $VERSION" \
             --notes "$NOTES" \
             dist/magpie-windows-amd64.exe
-          gh release upload "$TAG" feed/api-latest.json --clobber
-          echo "Published https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG"
-          echo "Feed: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/api-latest.json"
+          gh release upload "$TAG" feed/api-latest.json -R "$RELEASES_REPO" --clobber
+          echo "Published https://github.com/$RELEASES_REPO/releases/tag/$TAG"
+          echo "Feed: https://github.com/$RELEASES_REPO/releases/latest/download/api-latest.json"
