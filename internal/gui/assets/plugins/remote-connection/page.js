@@ -86,6 +86,9 @@ if (window.bootPrefs?.remoteClient === true) {
         if (!active || turn !== generation || version !== revision) return false;
         status = result;
         if (notice === "Remote connection: Status may be out of date") notice = "";
+        // A later successful connection must clear the failure that came before
+        // it, or the page keeps saying "could not be reached" while connected.
+        else if (notice && !result?.errorCode) notice = "";
         return true;
       } catch {
         if (active && turn === generation && version === revision) notice = "Remote connection: Status may be out of date";
